@@ -363,7 +363,7 @@ func writeInvestorEvidence(runDir string, filing investorFiling) error {
 		return nil
 	}
 	dir := filepath.Join(expandPath(runDir), "evidence")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	htmlPath, textPath := investorEvidencePaths(expandPath(runDir), filing)

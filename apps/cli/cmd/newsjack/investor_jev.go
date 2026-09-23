@@ -189,6 +189,8 @@ func investorScreenResultFromClient(result coarseCallResult) investorScreenResul
 }
 
 func investorStateFor(filing investorFiling, screen investorScreenSettings) map[string]any {
+	exhibitsNotCaptured := investorExhibitsNotCaptured(filing)
+	evidenceComplete := investorEvidenceComplete(filing)
 	subject := map[string]any{"kind": firstString(filing.SubjectKind, "issuer"), "code": filing.SubjectCode, "name": filing.SubjectName}
 	state := map[string]any{
 		"subject": subject,
@@ -196,8 +198,9 @@ func investorStateFor(filing investorFiling, screen investorScreenSettings) map[
 			"form": filing.Form, "accession": filing.Accession, "primary_document": filing.PrimaryDocument,
 			"primary_description": filing.PrimaryDescription, "filed_at": filing.FiledAt,
 			"available_at": filing.AvailableAt, "report_date": filing.ReportDate,
-			"document_text": filing.Text, "document_complete": filing.TextComplete,
-			"completeness_reason": filing.CompletenessReason, "document_digest": filing.DocumentDigest,
+			"document_text": filing.Text, "document_complete": evidenceComplete,
+			"primary_document_complete": filing.TextComplete, "completeness_reason": investorEvidenceCompletenessReason(filing),
+			"primary_document_completeness_reason": filing.CompletenessReason, "document_digest": filing.DocumentDigest,
 			"normalized_digest": filing.NormalizedDigest,
 		},
 		"source": map[string]any{
@@ -205,12 +208,31 @@ func investorStateFor(filing investorFiling, screen investorScreenSettings) map[
 			"observed_at": filing.ObservedAt, "submission_digest": filing.SubmissionDigest,
 		},
 		"research_focus": nonNilStrings(screen.ResearchFocus), "thesis_context": screen.ThesisContext,
-		"exhibits_not_captured": true,
+		"exhibits_not_captured": exhibitsNotCaptured,
 	}
 	if filing.Issuer.CIK != "" || filing.Issuer.Ticker != "" || filing.Issuer.Name != "" {
 		state["issuer"] = map[string]any{"cik": filing.Issuer.CIK, "ticker": filing.Issuer.Ticker, "name": filing.Issuer.Name}
 	}
 	return state
+}
+
+func investorExhibitsNotCaptured(filing investorFiling) bool {
+	return filing.SourceProvider == "sec"
+}
+
+func investorEvidenceComplete(filing investorFiling) bool {
+	return filing.TextComplete && !investorExhibitsNotCaptured(filing)
+}
+
+func investorEvidenceCompletenessReason(filing investorFiling) string {
+	reason := filing.CompletenessReason
+	if investorExhibitsNotCaptured(filing) {
+		if reason == "" || reason == "primary_document_captured" {
+			return "sec_exhibits_not_captured"
+		}
+		return reason + ";sec_exhibits_not_captured"
+	}
+	return reason
 }
 
 // investorSummaryHeadline is intentionally extractive. TypeSafe supplies typed
@@ -454,6 +476,12 @@ func investorItemFromScreen(filing investorFiling, result investorScreenResult, 
 	if err := writeInvestorEvidence(runDir, filing); err != nil {
 		return nil, fmt.Errorf("write evidence: %w", err)
 	}
+	exhibitsApplicable := investorExhibitsNotCaptured(filing)
+	evidenceComplete := investorEvidenceComplete(filing)
+	var exhibitsCaptured any
+	if exhibitsApplicable {
+		exhibitsCaptured = false
+	}
 	materiality := int(score.Materiality/4*100 + 0.5)
 	novelty := int(score.Novelty/4*100 + 0.5)
 	marketSensitivity := int(score.MarketSensitivity/4*100 + 0.5)
@@ -462,11 +490,11 @@ func investorItemFromScreen(filing investorFiling, result investorScreenResult, 
 	if filing.SourceProvider == "finnhub_news" {
 		sourceReliability = 75
 	}
-	if !filing.TextComplete {
+	if !evidenceComplete {
 		sourceReliability = minInt(sourceReliability, 70)
 	}
-	attention := investorAttentionScore(score, filing.TextComplete)
-	lane := investorLane(attention, score.Confidence, filing.TextComplete)
+	attention := investorAttentionScore(score, evidenceComplete)
+	lane := investorLane(attention, score.Confidence, evidenceComplete)
 	providerLabel := "SEC"
 	if filing.SourceProvider == "federal_register" {
 		providerLabel = "Federal Register"
@@ -484,11 +512,18 @@ func investorItemFromScreen(filing investorFiling, result investorScreenResult, 
 		rationale = append(rationale, "Low TypeSafe confidence forces human review.")
 	}
 	if lane == "incomplete" {
-		reason := "The primary document exceeded the capture bound, so it cannot be treated as complete evidence."
-		if filing.CompletenessReason == "abstract_only" {
-			reason = "Only the provider abstract was available; the full primary document was not captured, so this cannot be treated as complete evidence."
+		var reasons []string
+		if !filing.TextComplete {
+			reason := "The primary document exceeded the capture bound, so it cannot be treated as complete evidence."
+			if filing.CompletenessReason == "abstract_only" {
+				reason = "Only the provider abstract was available; the full primary document was not captured, so this cannot be treated as complete evidence."
+			}
+			reasons = append(reasons, reason)
 		}
-		rationale = append(rationale, reason)
+		if exhibitsApplicable {
+			reasons = append(reasons, "SEC filing exhibits were not captured; review the full filing before treating the evidence as complete.")
+		}
+		rationale = append(rationale, reasons...)
 	}
 	if filing.SourceProvider == "finnhub_news" {
 		rationale = append(rationale, "Finnhub is a secondary company-news feed; verify consequential claims against the linked source or a primary filing.")
@@ -508,9 +543,11 @@ func investorItemFromScreen(filing investorFiling, result investorScreenResult, 
 			"document_digest": filing.DocumentDigest, "normalized_digest": filing.NormalizedDigest, "raw_submission_path": filing.RawSubmissionPath, "raw_source_path": filing.RawSourcePath,
 		},
 		"evidence": map[string]any{
-			"excerpt": truncate(filing.Text, 1200), "complete": filing.TextComplete,
-			"completeness_reason": filing.CompletenessReason, "document_bytes": filing.DocumentBytes,
-			"exhibits_captured": false, "raw_path": nullableStringIfExists(htmlPath), "text_path": nullableStringIfExists(textPath),
+			"excerpt": truncate(filing.Text, 1200), "complete": evidenceComplete,
+			"primary_document_complete": filing.TextComplete, "completeness_reason": investorEvidenceCompletenessReason(filing),
+			"primary_document_completeness_reason": filing.CompletenessReason, "document_bytes": filing.DocumentBytes,
+			"exhibits_applicable": exhibitsApplicable, "exhibits_captured": exhibitsCaptured,
+			"exhibits_not_captured": exhibitsApplicable, "raw_path": nullableStringIfExists(htmlPath), "text_path": nullableStringIfExists(textPath),
 		},
 		"screening": map[string]any{
 			"engine": "typesafe_ai", "model": firstString(result.Model, investorDefaultModel),
@@ -532,7 +569,7 @@ func writeInvestorAudit(runDir, outputPath string, audit investorAudit) error {
 	data := marshalJSON(audit)
 	if strings.TrimSpace(runDir) != "" {
 		dir := expandPath(runDir)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 		if err := atomicWriteInvestorFile(filepath.Join(dir, "audit.json"), data); err != nil {
@@ -547,7 +584,7 @@ func writeInvestorAudit(runDir, outputPath string, audit investorAudit) error {
 
 func atomicWriteInvestorFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, ".newsjack-investor-*.tmp")
@@ -556,7 +593,7 @@ func atomicWriteInvestorFile(path string, data []byte) error {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o644); err != nil {
+	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		return err
 	}

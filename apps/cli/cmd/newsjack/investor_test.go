@@ -449,7 +449,7 @@ func TestInvestorScanUsesLiveShapedSECAndTypeSafeContracts(t *testing.T) {
 	// Keep this SEC contract test deterministic even when the developer
 	// environment has a live Finnhub credential configured.
 	t.Setenv("FINNHUB_API_KEY", "")
-	outDir := t.TempDir()
+	outDir := filepath.Join(t.TempDir(), "investor-run")
 	var stdout, stderr strings.Builder
 	code := runCLIWithIO([]string{"investor", "scan", "--watchlist", watchlistPath, "--since", "2026-09-20T00:00:00Z", "--run-dir", outDir, "--user-agent", "newsjack-test test@example.com"}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
@@ -465,15 +465,95 @@ func TestInvestorScanUsesLiveShapedSECAndTypeSafeContracts(t *testing.T) {
 	}
 	item := items[0].(map[string]any)
 	screen := item["screening"].(map[string]any)
-	if screen["lane"] != "read_now" || screen["model"] != "jev-test" {
+	if screen["lane"] != "incomplete" || screen["model"] != "jev-test" {
 		t.Fatalf("screening = %#v", screen)
 	}
-	if _, err := os.Stat(filepath.Join(outDir, "audit.json")); err != nil {
+	evidence := item["evidence"].(map[string]any)
+	if evidence["complete"] != false || evidence["primary_document_complete"] != true || evidence["exhibits_applicable"] != true || evidence["exhibits_captured"] != false || evidence["completeness_reason"] != "sec_exhibits_not_captured" {
+		t.Fatalf("SEC evidence completeness = %#v", evidence)
+	}
+	auditPath := filepath.Join(outDir, "audit.json")
+	if _, err := os.Stat(auditPath); err != nil {
 		t.Fatalf("audit artifact missing: %v", err)
 	}
 	evidenceDir := filepath.Join(outDir, "evidence")
 	entries, err := os.ReadDir(evidenceDir)
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("evidence entries = %d err=%v", len(entries), err)
+	}
+	for _, path := range []string{outDir, evidenceDir} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat output directory %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Errorf("directory mode for %s = %04o, want 0700", path, got)
+		}
+	}
+	for _, path := range append([]string{auditPath}, filepath.Join(evidenceDir, entries[0].Name()), filepath.Join(evidenceDir, entries[1].Name())) {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat private output %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("file mode for %s = %04o, want 0600", path, got)
+		}
+	}
+}
+
+func TestInvestorEvidenceMarksExhibitsOnlyForSEC(t *testing.T) {
+	watchlistScreen := investorScreenSettings{}
+	secState := investorStateFor(investorFiling{SourceProvider: "sec", TextComplete: true}, watchlistScreen)
+	secFiling := valueOrEmptyMap(secState["filing"])
+	if secFiling["document_complete"] != false || secFiling["primary_document_complete"] != true || secState["exhibits_not_captured"] != true {
+		t.Fatalf("SEC AI evidence state = %#v", secState)
+	}
+
+	federalState := investorStateFor(investorFiling{SourceProvider: "federal_register", TextComplete: true}, watchlistScreen)
+	if federalState["exhibits_not_captured"] != false {
+		t.Fatalf("Federal Register exhibits state = %#v", federalState["exhibits_not_captured"])
+	}
+}
+
+func TestAtomicInvestorFileUsesPrivateModesWithoutChangingExistingDirectories(t *testing.T) {
+	root := t.TempDir()
+	newDir := filepath.Join(root, "private", "nested")
+	newPath := filepath.Join(newDir, "audit.json")
+	if err := atomicWriteInvestorFile(newPath, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Dir(newDir), newDir} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat newly created directory %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Errorf("new directory mode for %s = %04o, want 0700", path, got)
+		}
+	}
+	newInfo, err := os.Stat(newPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := newInfo.Mode().Perm(); got != 0o600 {
+		t.Errorf("new file mode = %04o, want 0600", got)
+	}
+
+	existingDir := filepath.Join(root, "existing")
+	if err := os.Mkdir(existingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(existingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteInvestorFile(filepath.Join(existingDir, "capture.json"), []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	existingInfo, err := os.Stat(existingDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := existingInfo.Mode().Perm(); got != 0o755 {
+		t.Errorf("pre-existing directory mode changed to %04o, want unchanged 0755", got)
 	}
 }
