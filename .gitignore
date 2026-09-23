@@ -1,5 +1,6 @@
 # ─── deps ─────────────────────────────────────────────
 node_modules/
+node_modules
 .pnpm-store/
 .yarn/
 
@@ -32,8 +33,12 @@ credentials/
 .turbo/
 .cache/
 dist/
+/drizzle/
 out/
 build/
+!/apps/investor-desk-newsjack/build/
+/apps/investor-desk-newsjack/build/*
+!/apps/investor-desk-newsjack/build/sites-vite-plugin.ts
 coverage/
 apps/cli/newsjack
 apps/cli/newsjack.exe
@@ -43,6 +48,14 @@ apps/cli/newsjack.exe
 # coverage trackers) write here. Client names, evidence and prompts must never
 # land in this OSS repo. Use eval/ or fixtures/ for anything shareable.
 runs/
+
+# Local live-source and release-gate evidence may contain restricted provider
+# captures, user-specific research, or runtime diagnostics; never publish it.
+/.evidence/
+/.engineering-evidence/
+/reports/
+**/.wrangler/
+**/.dev.vars*
 
 # ─── editor / os ──────────────────────────────────────
 .DS_Store

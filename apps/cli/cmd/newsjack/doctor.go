@@ -92,7 +92,7 @@ func printDoctor(w io.Writer, root string, rootErr error, medialystConfigured bo
 	uiSection(w, "auth")
 	uiKV(w, "Medialyst", doctorAuthStatus(medialystConfigured, medialystSource))
 	uiKV(w, "X API", doctorStatus(xConfigured))
-	uiKV(w, "TypeSafe (Jev)", doctorOptionalStatus(typesafeConfigured, typesafeSource, "newsjack auth set-typesafe --key <key>"))
+	uiKV(w, "TypeSafe AI", doctorOptionalStatus(typesafeConfigured, typesafeSource, "newsjack auth set-typesafe --key <key>"))
 
 	fmt.Fprintln(w)
 	uiSection(w, "sources")

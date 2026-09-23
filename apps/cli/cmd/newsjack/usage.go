@@ -31,13 +31,14 @@ func printUsage(w io.Writer) {
 	uiCommand(w, "monitor init|test|run...", "manage newsjacking monitors and optional Slack delivery", "")
 	uiCommand(w, "coverage list|init|check...", "manage coverage trackers", "")
 	uiCommand(w, "detector run|recent...", "angle detection over recent stories", "")
+	uiCommand(w, "investor scan", "screen primary SEC filings for investor review", "--watchlist FILE")
 	uiCommand(w, "update", "pull the latest skill bundle", "")
 	fmt.Fprintln(w)
 	uiSection(w, "api setup")
 	uiCommand(w, "login", "recommended Medialyst browser login for live news search, journalist enrichment, and media list research", "")
 	uiCommand(w, "auth set-medialyst", "API-key fallback for CI or automation", "--key KEY")
 	uiCommand(w, "auth set-x", "save X bearer token for X News, trends, and post search", "--bearer-token TOKEN")
-	uiCommand(w, "auth set-typesafe", "save TypeSafe AI key for Jev coarse filtering", "--key KEY")
+	uiCommand(w, "auth set-typesafe", "save TypeSafe AI key for typed coarse filtering", "--key KEY")
 	uiKV(w, "Medialyst login", "newsjack login")
 	uiKV(w, "Medialyst API key", medialystAPIKeyURL)
 	uiKV(w, "X bearer token", xAPIKeyURL)
@@ -45,7 +46,7 @@ func printUsage(w io.Writer) {
 	uiNote(w, "Medialyst REST commands prefer saved OAuth, then API keys from ~/.newsjack/credentials.json or MEDIALYST_API_KEY.")
 	fmt.Fprintln(w)
 	uiSection(w, "pipeline")
-	uiCommand(w, "coarse-filter", "run the coarse-relevance pass through Jev (TypeSafe AI)", "--engine jev --candidates F")
+	uiCommand(w, "coarse-filter", "run the coarse-relevance pass through TypeSafe AI typed screening", "--engine jev --candidates F")
 	uiCommand(w, "filter-apply", "apply coarse-relevance decisions to candidates", "--candidates F --decisions F")
 	uiCommand(w, "cluster", "collapse same-story pickups before retrieval", "--candidates F [--drop-stale]")
 	uiCommand(w, "origin-apply", "apply the deterministic freshness gate", "--candidates F --origins F")
@@ -127,6 +128,9 @@ func printCommandHelp(w io.Writer, command string) bool {
 		return true
 	case "coarse-filter":
 		printCoarseFilterHelp(w)
+		return true
+	case "investor", "investor scan":
+		printInvestorHelp(w)
 		return true
 	case "monitor", "monitor delivery", "monitor delivery set-slack", "monitor delivery status", "monitor delivery test", "monitor delivery send", "monitor delivery remove-slack":
 		printMonitorHelp(w)

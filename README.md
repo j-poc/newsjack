@@ -27,6 +27,36 @@ Four problems, separate lanes.
 Each capability is a skill. Invoke it by name — `/angle-generator`, `/fact-check` —
 or just describe what you want and your agent picks the right one.
 
+### 📈 Investor edition — primary-source research queue
+
+This fork also includes an investor workflow built on the same CLI + skill
+surface:
+
+- **`newsjack investor scan`** — capture SEC and Federal Register records for a
+  company-name/ticker watchlist, a bounded all-public issuer rotation, federal
+  records, or the combined wire; preserve source provenance; and screen them
+  through TypeSafe AI typed screening.
+- **`/newsjack-investor`** — render an evidence-linked “read now / monitor /
+  human review” brief. TypeSafe AI answers, code ranks, and the investor decides.
+- **`apps/investor-desk-newsjack`** — run the Newsjack-native editorial review
+  surface locally. It reads the CLI audit contract; it does not reimplement SEC
+  ingestion or TypeSafe AI screening in the browser.
+
+The hosted investor wire uses public SEC EDGAR and FederalRegister.gov sources;
+the SEC directory is searchable separately from the bounded rolling filing
+scan and the investor's personal watchlist. Directory availability does not
+mean an issuer's filings have been fetched or screened. Federal Register pagination is
+bounded and reported as degraded when a refresh cannot cover its full seven-day
+window. Finnhub content requests remain disabled. Its key is stored only as an
+encrypted app-only runtime secret under user authorization, and processing is
+explicitly false until provider rights and written permission allow sending its
+data to TypeSafe AI. No EODHD or Bloomberg data is used. FederalRegister.gov renditions are informational; verify the official
+edition on [govinfo](https://www.govinfo.gov/app/collection/fr) before legal
+reliance.
+
+The investor edition deliberately does not place trades, set targets, forecast
+returns, or hide incomplete evidence. See the [investor architecture](docs/2026-09-investor-edition-architecture.md).
+
 ### 🛰️ Detect — surface what matters in your space
 
 - ⚙️ **`/newsjack-monitor-setup`** — build the monitoring profile once: your standing, beat topics, competitors, proof assets, spokespeople, feeds, and optional Slack delivery *(local agent only)*

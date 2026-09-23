@@ -1,0 +1,49 @@
+{
+  "name": "newsjack-investor-desk",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "dev": "concurrently -k \"tsx server/index.ts\" \"vite\"",
+    "build": "pnpm typecheck && pnpm typecheck:worker && pnpm build:assets && pnpm build:worker",
+    "build:assets": "vite build",
+    "build:worker": "vite build --config vite.worker.config.ts",
+    "start": "tsx server/index.ts",
+    "typecheck": "tsc --noEmit --pretty false",
+    "typecheck:worker": "tsc --project tsconfig.worker.json --noEmit --pretty false",
+    "db:generate": "drizzle-kit generate",
+    "test": "pnpm test:unit && pnpm test:worker",
+    "test:unit": "vitest run --exclude worker-tests/**",
+    "test:worker": "vitest run --config vitest.worker.config.ts",
+    "verify": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "6.1.1",
+    "better-sqlite3": "13.0.3",
+    "concurrently": "10.0.5",
+    "express": "5.2.1",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.2.2",
+    "@cloudflare/workers-types": "5.20260923.1",
+    "@types/better-sqlite3": "9.6.0",
+    "@types/express": "5.0.6",
+    "@types/node": "26.6.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "drizzle-kit": "^0.31.11",
+    "drizzle-orm": "^0.45.3",
+    "jsdom": "30.1.0",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.0",
+    "vitest": "4.1.0"
+  }
+}

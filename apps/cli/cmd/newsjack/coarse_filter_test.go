@@ -432,7 +432,7 @@ func TestAuthSetTypeSafeAndDoctorReportIt(t *testing.T) {
 		if code := runCLI([]string{"auth", "set-typesafe", "--key", "ts-secret"}, &out, &errBuf); code != 0 {
 			t.Fatalf("auth set-typesafe code=%d stderr=%s", code, errBuf.String())
 		}
-		if !strings.Contains(out.String(), "Jev coarse filtering") {
+		if !strings.Contains(out.String(), "TypeSafe AI typed coarse filtering") {
 			t.Fatalf("auth set-typesafe should explain usage: %s", out.String())
 		}
 		key, source := loadTypeSafeAPIKey()
@@ -467,7 +467,7 @@ func TestAuthSetTypeSafeAndDoctorReportIt(t *testing.T) {
 		}
 		out.Reset()
 		runCLI([]string{"doctor"}, &out, &errBuf)
-		if !strings.Contains(out.String(), "TypeSafe (Jev)") {
+		if !strings.Contains(out.String(), "TypeSafe AI") {
 			t.Fatalf("human doctor output should list TypeSafe: %s", out.String())
 		}
 	})

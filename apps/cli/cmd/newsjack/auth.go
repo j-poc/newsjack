@@ -126,7 +126,7 @@ func cmdAuthSet(args []string, stdout, stderr io.Writer) int {
 	medialystKey := fs.String("medialyst-key", "", "Medialyst API key")
 	xBearerToken := fs.String("x-bearer-token", "", "X API bearer token")
 	xToken := fs.String("x-token", "", "Alias for --x-bearer-token")
-	typesafeKey := fs.String("typesafe-key", "", "TypeSafe AI API key for Jev coarse filtering")
+	typesafeKey := fs.String("typesafe-key", "", "TypeSafe AI API key for typed coarse filtering")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -174,7 +174,7 @@ func saveTypeSafeAPIKey(key string, stdout, stderr io.Writer) int {
 		return fail(stderr, err)
 	}
 	uiSuccess(stdout, "saved TypeSafe API key to %s", newsjackEnvPath())
-	uiNote(stdout, "used for: Jev coarse filtering (newsjack coarse-filter --engine jev)")
+	uiNote(stdout, "used for: TypeSafe AI typed coarse filtering (newsjack coarse-filter --engine jev)")
 	return 0
 }
 
