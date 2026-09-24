@@ -12,11 +12,30 @@ import {
   type SourceHealth,
   type WatchlistEntry,
 } from "../src/domain";
-import type { CaptureRecord, WorkerEnv } from "./types";
+import type { CaptureRecord, SqlStatement, WorkerEnv } from "./types";
 import { z } from "zod";
 
 const STALE_AFTER_MS = 20 * 60 * 1000;
 const InstantTextSchema = z.string().datetime({ offset: true });
+const MetaRowSchema = z.object({ value: z.string() });
+const FoundRowSchema = z.object({ found: z.number() });
+const TokenRowSchema = z.object({ token: z.string() });
+const AttemptRowSchema = z.object({ attempt_count: z.number().int().nonnegative() });
+const WatchlistRowSchema = z.object({ issuer_json: z.string(), added_at: z.string() });
+const CikRowSchema = z.object({ cik: z.string() });
+const EventSnapshotRowSchema = z.object({
+  event_json: z.string(),
+  review_status: z.string(),
+  review_note: z.string(),
+  review_updated_at: z.string().nullable(),
+});
+const HealthRowSchema = z.object({
+  provider: z.string(),
+  status: z.string(),
+  freshness: z.string(),
+  message: z.string(),
+  checked_at: z.string(),
+});
 
 export interface ScreeningRunRecord {
   provider: string;
@@ -130,7 +149,7 @@ export class InvestorRepository {
 
   public async getMeta(key: string): Promise<string | null> {
     const row = await this.env.DB.prepare("SELECT value FROM meta WHERE owner_id = ? AND key = ? LIMIT 1")
-      .bind(this.ownerId, key).first<{ value: string }>();
+      .bind(this.ownerId, key).first(MetaRowSchema);
     return row?.value ?? null;
   }
 
@@ -143,22 +162,22 @@ export class InvestorRepository {
   }
 
   public async getWatchlist(): Promise<WatchlistEntry[]> {
-    const result = await this.env.DB.prepare("SELECT issuer_json, added_at FROM watchlist WHERE owner_id = ? ORDER BY added_at, cik")
-      .bind(this.ownerId).all<{ issuer_json: string; added_at: string }>();
-    return result.results.map((row) => WatchlistEntrySchema.parse({ issuer: JSON.parse(row.issuer_json), addedAt: row.added_at }));
+    const rows = await this.env.DB.prepare("SELECT issuer_json, added_at FROM watchlist WHERE owner_id = ? ORDER BY added_at, cik")
+      .bind(this.ownerId).all(WatchlistRowSchema);
+    return rows.map((row) => WatchlistEntrySchema.parse({ issuer: JSON.parse(row.issuer_json), addedAt: row.added_at }));
   }
 
   public async hasScreening(provider: string, nativeId: string, sourceDigest: string, sourceVersionDigest: string, contractDigest: string): Promise<boolean> {
     const row = await this.env.DB.prepare(
       "SELECT 1 AS found FROM screening_runs_v2 WHERE owner_id = ? AND source_provider = ? AND native_id = ? AND source_digest = ? AND source_version_digest = ? AND contract_digest = ? LIMIT 1",
-    ).bind(this.ownerId, provider, nativeId, sourceDigest, sourceVersionDigest, contractDigest).first<{ found: number }>();
+    ).bind(this.ownerId, provider, nativeId, sourceDigest, sourceVersionDigest, contractDigest).first(FoundRowSchema);
     return row !== null;
   }
 
   public async hasScreeningForNative(provider: string, nativeId: string, contractDigest: string): Promise<boolean> {
     const row = await this.env.DB.prepare(
       "SELECT 1 AS found FROM screening_runs_v2 WHERE owner_id = ? AND source_provider = ? AND native_id = ? AND contract_digest = ? AND capture_kind = 'full_text' LIMIT 1",
-    ).bind(this.ownerId, provider, nativeId, contractDigest).first<{ found: number }>();
+    ).bind(this.ownerId, provider, nativeId, contractDigest).first(FoundRowSchema);
     return row !== null;
   }
 
@@ -167,28 +186,28 @@ export class InvestorRepository {
       SELECT 1 AS found FROM screening_runs_v2
       WHERE owner_id = ? AND source_provider = ? AND native_id = ? AND source_version_digest = ?
         AND contract_digest = ? AND capture_kind = 'full_text' LIMIT 1
-    `).bind(this.ownerId, provider, nativeId, sourceVersionDigest, contractDigest).first<{ found: number }>();
+    `).bind(this.ownerId, provider, nativeId, sourceVersionDigest, contractDigest).first(FoundRowSchema);
     return row !== null;
   }
 
   public async hasRecentFullTextScreeningForNative(provider: string, nativeId: string, contractDigest: string, cutoff: string): Promise<boolean> {
     const row = await this.env.DB.prepare(
       "SELECT 1 AS found FROM screening_runs_v2 WHERE owner_id = ? AND source_provider = ? AND native_id = ? AND contract_digest = ? AND capture_kind = 'full_text' AND last_validated_at > ? LIMIT 1",
-    ).bind(this.ownerId, provider, nativeId, contractDigest, cutoff).first<{ found: number }>();
+    ).bind(this.ownerId, provider, nativeId, contractDigest, cutoff).first(FoundRowSchema);
     return row !== null;
   }
 
   public async hasRecentFullTextScreeningForVersion(provider: string, nativeId: string, sourceVersionDigest: string, contractDigest: string, cutoff: string): Promise<boolean> {
     const row = await this.env.DB.prepare(
       "SELECT 1 AS found FROM screening_runs_v2 WHERE owner_id = ? AND source_provider = ? AND native_id = ? AND source_version_digest = ? AND contract_digest = ? AND capture_kind = 'full_text' AND last_validated_at > ? LIMIT 1",
-    ).bind(this.ownerId, provider, nativeId, sourceVersionDigest, contractDigest, cutoff).first<{ found: number }>();
+    ).bind(this.ownerId, provider, nativeId, sourceVersionDigest, contractDigest, cutoff).first(FoundRowSchema);
     return row !== null;
   }
 
   public async refreshEventObservation(provider: string, nativeId: string, sourceDigest: string, observedAt: string, lockToken: string): Promise<void> {
     const row = await this.env.DB.prepare(
       "SELECT event_json FROM events WHERE owner_id = ? AND provider = ? AND native_id = ? LIMIT 1",
-    ).bind(this.ownerId, provider, nativeId).first<{ event_json: string }>();
+    ).bind(this.ownerId, provider, nativeId).first(z.object({ event_json: z.string() }));
     if (row === null) return;
     const event = EventSchema.parse(JSON.parse(row.event_json));
     if (event.source.digest !== sourceDigest) return;
@@ -207,7 +226,7 @@ export class InvestorRepository {
           AND EXISTS (SELECT 1 FROM refresh_locks WHERE owner_id = ? AND token = ? AND expires_at = ?)
       `).bind(JSON.stringify(refreshed), observedAt, observedAt, this.ownerId, provider, nativeId, this.ownerId, lockToken, leaseExpiresAt),
     ]);
-    if (results[0]?.meta.changes !== 1) throw new Error("Refresh ownership expired before the event observation update.");
+    if (results[0]?.rowsAffected !== 1) throw new Error("Refresh ownership expired before the event observation update.");
   }
 
   public async touchScreening(record: Pick<ScreeningRunRecord, "provider" | "nativeId" | "sourceDigest" | "sourceVersionDigest" | "contractDigest">, validatedAt: string, lockToken: string): Promise<void> {
@@ -224,7 +243,7 @@ export class InvestorRepository {
       `).bind(validatedAt, this.ownerId, record.provider, record.nativeId, record.sourceDigest, record.sourceVersionDigest,
         record.contractDigest, this.ownerId, lockToken, leaseExpiresAt),
     ]);
-    if (results[0]?.meta.changes !== 1) throw new Error("Refresh ownership expired before the screening validation update.");
+    if (results[0]?.rowsAffected !== 1) throw new Error("Refresh ownership expired before the screening validation update.");
   }
 
   public async recordCaptures(captures: readonly CaptureRecord[]): Promise<void> {
@@ -266,7 +285,7 @@ export class InvestorRepository {
       if (discoveryCik !== undefined) await this.completeSecDiscoveryReplay(scope, discoveryCik, submissionCapture.sha256, lockToken);
       return;
     }
-    const makeCapture = (leaseExpiresAt: string): D1PreparedStatement => this.env.DB.prepare(`
+    const makeCapture = (leaseExpiresAt: string): SqlStatement => this.env.DB.prepare(`
       INSERT INTO source_captures (
         owner_id, provider, native_id, sha256, object_key, source_url, content_type,
         byte_length, observed_at, adapter_version
@@ -288,7 +307,7 @@ export class InvestorRepository {
       lockToken,
       leaseExpiresAt,
     );
-    const makeReplayCompletion = (leaseExpiresAt: string): D1PreparedStatement | null => discoveryCik === undefined
+    const makeReplayCompletion = (leaseExpiresAt: string): SqlStatement | null => discoveryCik === undefined
       ? null
       : this.env.DB.prepare(`
           DELETE FROM sec_discovery_replays
@@ -296,7 +315,7 @@ export class InvestorRepository {
             AND EXISTS (SELECT 1 FROM refresh_locks WHERE owner_id = ? AND token = ? AND expires_at = ?)
         `).bind(this.ownerId, scope, discoveryCik, submissionCapture.nativeId, submissionCapture.sha256,
           this.ownerId, lockToken, leaseExpiresAt);
-    const filingStatements = filings.map((filing) => (leaseExpiresAt: string): D1PreparedStatement => {
+    const filingStatements = filings.map((filing) => (leaseExpiresAt: string): SqlStatement => {
       const issuer = SecQueueIssuerSchema.parse(filing.issuer);
       if (issuer.cik !== filing.cik || !/^[0-9]{10}-[0-9]{2}-[0-9]{6}$/.test(filing.accession)
         || filing.nativeId !== `SEC:${filing.cik}:${filing.accession}`) {
@@ -376,8 +395,8 @@ export class InvestorRepository {
         ? [lease, makeCapture(leaseExpiresAt), ...chunk, ...(completion === null ? [] : [completion])]
         : [lease, ...chunk, ...(completion === null ? [] : [completion])];
       const results = await this.env.DB.batch(statements);
-      if (results[0]?.meta.changes !== 1) throw new Error("Refresh ownership expired before SEC discovery was persisted.");
-      if (completion !== null && results.at(-1)?.meta.changes !== 1) {
+      if (results[0]?.rowsAffected !== 1) throw new Error("Refresh ownership expired before SEC discovery was persisted.");
+      if (completion !== null && results.at(-1)?.rowsAffected !== 1) {
         throw new Error("SEC discovery queue was written, but its exact replay pointer could not be cleared.");
       }
     }
@@ -392,7 +411,7 @@ export class InvestorRepository {
         AND c.native_id = r.native_id AND c.sha256 = r.capture_sha256
       WHERE r.owner_id = ? AND r.scope = ? AND r.cik = ?
       LIMIT 1
-    `).bind(this.ownerId, scope, cik).first<SecDiscoveryReplayRow>();
+    `).bind(this.ownerId, scope, cik).first(SecDiscoveryReplayRowSchema);
     if (row === null) return null;
     if (row.object_key === null || row.owner_id === null || row.provider === null || row.native_id === null
       || row.sha256 === null || row.source_url === null || row.content_type === null
@@ -456,8 +475,8 @@ export class InvestorRepository {
       `).bind(this.ownerId, scope, issuer.cik, capture.nativeId, capture.sha256, JSON.stringify(issuer), capture.observedAt,
         this.ownerId, lockToken, leaseExpiresAt),
     ]);
-    if (results[0]?.meta.changes !== 1) throw new Error("Refresh ownership expired before SEC discovery replay was recorded.");
-    if (results[2]?.meta.changes !== 1) throw new Error("A prior SEC discovery replay already exists for this issuer; it was preserved.");
+    if (results[0]?.rowsAffected !== 1) throw new Error("Refresh ownership expired before SEC discovery replay was recorded.");
+    if (results[2]?.rowsAffected !== 1) throw new Error("A prior SEC discovery replay already exists for this issuer; it was preserved.");
   }
 
   public async discardSecDiscoveryReplay(scope: SecQueueScope, cik: string, captureSha256: string, lockToken: string): Promise<void> {
@@ -474,7 +493,7 @@ export class InvestorRepository {
           AND EXISTS (SELECT 1 FROM refresh_locks WHERE owner_id = ? AND token = ? AND expires_at = ?)
       `).bind(this.ownerId, scope, cik, captureSha256, this.ownerId, lockToken, leaseExpiresAt),
     ]);
-    if (results[0]?.meta.changes !== 1) throw new Error("Refresh ownership expired before invalid SEC discovery replay was cleared.");
+    if (results[0]?.rowsAffected !== 1) throw new Error("Refresh ownership expired before invalid SEC discovery replay was cleared.");
   }
 
   private async completeSecDiscoveryReplay(scope: SecQueueScope, cik: string, captureSha256: string, lockToken: string): Promise<void> {
@@ -491,8 +510,8 @@ export class InvestorRepository {
           AND EXISTS (SELECT 1 FROM refresh_locks WHERE owner_id = ? AND token = ? AND expires_at = ?)
       `).bind(this.ownerId, scope, cik, captureSha256, this.ownerId, lockToken, leaseExpiresAt),
     ]);
-    if (results[0]?.meta.changes !== 1) throw new Error("Refresh ownership expired before the empty SEC discovery replay was cleared.");
-    if (results[1]?.meta.changes !== 1) throw new Error("The exact empty SEC discovery replay could not be cleared.");
+    if (results[0]?.rowsAffected !== 1) throw new Error("Refresh ownership expired before the empty SEC discovery replay was cleared.");
+    if (results[1]?.rowsAffected !== 1) throw new Error("The exact empty SEC discovery replay could not be cleared.");
   }
 
   public async getDueSecIssuerRetries(scope: SecQueueScope, now: string, limit: number): Promise<SecIssuerRetry[]> {
@@ -503,14 +522,14 @@ export class InvestorRepository {
           WHERE r.owner_id = ? AND r.scope = ? AND r.next_attempt_at <= ?
             AND EXISTS (SELECT 1 FROM watchlist w WHERE w.owner_id = r.owner_id AND w.cik = r.cik)
           ORDER BY r.next_attempt_at, r.cik LIMIT ?
-        `).bind(this.ownerId, scope, now, limit).all<SecIssuerRetryRow>()
+        `).bind(this.ownerId, scope, now, limit).all(SecIssuerRetryRowSchema)
       : await this.env.DB.prepare(`
           SELECT cik, issuer_json, attempt_count, next_attempt_at, last_error
           FROM sec_issuer_retries
           WHERE owner_id = ? AND scope = ? AND next_attempt_at <= ?
           ORDER BY next_attempt_at, cik LIMIT ?
-        `).bind(this.ownerId, scope, now, limit).all<SecIssuerRetryRow>();
-    return result.results.map((row) => ({
+        `).bind(this.ownerId, scope, now, limit).all(SecIssuerRetryRowSchema);
+    return result.map((row) => ({
       scope,
       cik: row.cik,
       issuer: SecQueueIssuerSchema.parse(JSON.parse(row.issuer_json)),
@@ -527,12 +546,12 @@ export class InvestorRepository {
           WHERE r.owner_id = ? AND r.scope = ?
             AND EXISTS (SELECT 1 FROM watchlist w WHERE w.owner_id = r.owner_id AND w.cik = r.cik)
           ORDER BY r.next_attempt_at, r.cik
-        `).bind(this.ownerId, scope).all<{ cik: string }>()
+        `).bind(this.ownerId, scope).all(CikRowSchema)
       : await this.env.DB.prepare(`
           SELECT cik FROM sec_issuer_retries WHERE owner_id = ? AND scope = ?
           ORDER BY next_attempt_at, cik
-        `).bind(this.ownerId, scope).all<{ cik: string }>();
-    return result.results.map((row) => row.cik);
+        `).bind(this.ownerId, scope).all(CikRowSchema);
+    return result.map((row) => row.cik);
   }
 
   public async recordSecIssuerFailure(
@@ -545,7 +564,7 @@ export class InvestorRepository {
     const issuer = SecQueueIssuerSchema.parse(issuerValue);
     const existing = await this.env.DB.prepare(`
       SELECT attempt_count FROM sec_issuer_retries WHERE owner_id = ? AND scope = ? AND cik = ? LIMIT 1
-    `).bind(this.ownerId, scope, issuer.cik).first<{ attempt_count: number }>();
+    `).bind(this.ownerId, scope, issuer.cik).first(AttemptRowSchema);
     const attempts = (existing?.attempt_count ?? 0) + 1;
     const delay = [60_000, 5 * 60_000, 30 * 60_000, 6 * 60 * 60_000][Math.min(attempts - 1, 3)] ?? 6 * 60 * 60_000;
     const nextAttemptAt = new Date(Date.parse(now) + delay).toISOString();
@@ -580,7 +599,7 @@ export class InvestorRepository {
         leaseExpiresAt,
       ),
     ]);
-    if (results[0]?.meta.changes !== 1) throw new Error("Refresh ownership expired before the SEC issuer retry was persisted.");
+    if (results[0]?.rowsAffected !== 1) throw new Error("Refresh ownership expired before the SEC issuer retry was persisted.");
   }
 
   public async getDueSecFilings(
@@ -605,7 +624,7 @@ export class InvestorRepository {
           AND EXISTS (SELECT 1 FROM refresh_locks WHERE owner_id = ? AND token = ? AND expires_at = ?)
       `).bind(contractDigest, now, now, this.ownerId, contractDigest, this.ownerId, lockToken, leaseExpiresAt),
     ]);
-    if (requeue[0]?.meta.changes !== 1) throw new Error("Refresh ownership expired before SEC backlog selection.");
+    if (requeue[0]?.rowsAffected !== 1) throw new Error("Refresh ownership expired before SEC backlog selection.");
 
     const scopePredicate = scope === "public" ? "q.public_discovered = 1" : "w.cik IS NOT NULL";
     const watchlistJoin = scope === "watchlist" ? "JOIN watchlist w ON w.owner_id = q.owner_id AND w.cik = q.cik" : "";
@@ -634,8 +653,8 @@ export class InvestorRepository {
         attempt_count, next_attempt_at
       FROM due WHERE issuer_rank <= ?
       ORDER BY revalidation_rank, filed_at, cik, native_id LIMIT ?
-    `).bind(this.ownerId, now, perIssuerLimit, limit).all<SecFilingQueueRow>();
-    return rows.results.map((row) => parseSecFilingQueueRow(row));
+    `).bind(this.ownerId, now, perIssuerLimit, limit).all(SecFilingQueueRowSchema);
+    return rows.map((row) => parseSecFilingQueueRow(row));
   }
 
   public async acquireRefreshLock(token: string, now: string): Promise<boolean> {
@@ -645,7 +664,7 @@ export class InvestorRepository {
       ON CONFLICT(owner_id) DO UPDATE SET token = excluded.token, expires_at = excluded.expires_at
       WHERE refresh_locks.expires_at <= ?
       RETURNING token
-    `).bind(this.ownerId, token, expiresAt, now).first<{ token: string }>();
+    `).bind(this.ownerId, token, expiresAt, now).first(TokenRowSchema);
     return row?.token === token;
   }
 
@@ -659,7 +678,7 @@ export class InvestorRepository {
       UPDATE refresh_locks SET expires_at = ?
       WHERE owner_id = ? AND token = ? AND expires_at > ?
     `).bind(expiresAt, this.ownerId, token, now).run();
-    return result.meta.changes === 1;
+    return result.rowsAffected === 1;
   }
 
   public async recordRefreshAttempt(at: string): Promise<void> {
@@ -695,11 +714,11 @@ export class InvestorRepository {
       eventId,
       this.env.FINNHUB_PROCESSING_APPROVED === "true" ? "true" : "false",
     ).run();
-    return result.meta.changes === 1;
+    return result.rowsAffected === 1;
   }
 
   public async recordRefresh(write: RefreshWrite, lockToken: string): Promise<void> {
-    const statements: D1PreparedStatement[] = [];
+    const statements: SqlStatement[] = [];
     const checkedAt = new Date().toISOString();
     const leaseExpiresAt = new Date(Date.parse(checkedAt) + 5 * 60 * 1000).toISOString();
     statements.push(this.env.DB.prepare(`
@@ -867,17 +886,17 @@ export class InvestorRepository {
         value = excluded.value, version = meta.version + 1, updated_at = excluded.updated_at
     `).bind(this.ownerId, write.refreshedAt, write.refreshedAt, this.ownerId, lockToken, leaseExpiresAt));
 
-    if (statements.length > 90) throw new Error("Refresh result exceeded the atomic D1 write limit; no cursor was advanced.");
+    if (statements.length > 90) throw new Error("Refresh result exceeded the bounded atomic write limit; no cursor was advanced.");
     const results = await this.env.DB.batch(statements);
-    if (results[0]?.meta.changes !== 1) throw new Error("Refresh ownership expired before the result commit; no refresh writes were accepted.");
+    if (results[0]?.rowsAffected !== 1) throw new Error("Refresh ownership expired before the result commit; no refresh writes were accepted.");
   }
 
   public async getSnapshot(now = new Date()): Promise<AppSnapshot> {
     const eventRows = await this.env.DB.prepare(`
       SELECT event_json, review_status, review_note, review_updated_at
       FROM events WHERE owner_id = ?
-    `).bind(this.ownerId).all<{ event_json: string; review_status: string; review_note: string; review_updated_at: string | null }>();
-    const events = sortEvents(eventRows.results.map((row) => {
+    `).bind(this.ownerId).all(EventSnapshotRowSchema);
+    const events = sortEvents(eventRows.map((row) => {
       const event = EventSchema.parse(JSON.parse(row.event_json));
       return EventSchema.parse({
         ...event,
@@ -887,12 +906,12 @@ export class InvestorRepository {
     })).filter((event) => this.env.FINNHUB_PROCESSING_APPROVED === "true" || event.source.provider !== "finnhub_news");
 
     const watchRows = await this.env.DB.prepare("SELECT issuer_json, added_at FROM watchlist WHERE owner_id = ? ORDER BY added_at, cik")
-      .bind(this.ownerId).all<{ issuer_json: string; added_at: string }>();
-    const watch = watchRows.results.map((row) => WatchlistEntrySchema.parse({ issuer: JSON.parse(row.issuer_json), addedAt: row.added_at }));
+      .bind(this.ownerId).all(WatchlistRowSchema);
+    const watch = watchRows.map((row) => WatchlistEntrySchema.parse({ issuer: JSON.parse(row.issuer_json), addedAt: row.added_at }));
 
     const healthRows = await this.env.DB.prepare("SELECT provider, status, freshness, message, checked_at FROM source_health WHERE owner_id = ? ORDER BY provider")
-      .bind(this.ownerId).all<{ provider: string; status: string; freshness: string; message: string; checked_at: string }>();
-    const health = healthRows.results
+      .bind(this.ownerId).all(HealthRowSchema);
+    const health = healthRows
       .filter((row) => this.env.FINNHUB_PROCESSING_APPROVED === "true" || row.provider !== "finnhub_news")
       .map((row) => SourceHealthSchema.parse({
       provider: row.provider,
@@ -925,44 +944,47 @@ export class InvestorRepository {
   }
 }
 
-interface SecIssuerRetryRow {
-  cik: string;
-  issuer_json: string;
-  attempt_count: number;
-  next_attempt_at: string;
-  last_error: string;
-}
+const SecIssuerRetryRowSchema = z.object({
+  cik: z.string(),
+  issuer_json: z.string(),
+  attempt_count: z.number().int().nonnegative(),
+  next_attempt_at: z.string(),
+  last_error: z.string(),
+});
+type SecIssuerRetryRow = z.infer<typeof SecIssuerRetryRowSchema>;
 
-interface SecDiscoveryReplayRow {
-  issuer_json: string;
-  owner_id: string | null;
-  provider: string | null;
-  native_id: string | null;
-  sha256: string | null;
-  object_key: string | null;
-  source_url: string | null;
-  content_type: string | null;
-  byte_length: number | null;
-  observed_at: string | null;
-  adapter_version: string | null;
-}
+const SecDiscoveryReplayRowSchema = z.object({
+  issuer_json: z.string(),
+  owner_id: z.string().nullable(),
+  provider: z.string().nullable(),
+  native_id: z.string().nullable(),
+  sha256: z.string().nullable(),
+  object_key: z.string().nullable(),
+  source_url: z.string().nullable(),
+  content_type: z.string().nullable(),
+  byte_length: z.number().int().nullable(),
+  observed_at: z.string().nullable(),
+  adapter_version: z.string().nullable(),
+});
+type SecDiscoveryReplayRow = z.infer<typeof SecDiscoveryReplayRowSchema>;
 
-interface SecFilingQueueRow {
-  native_id: string;
-  cik: string;
-  accession: string;
-  issuer_json: string;
-  form: string;
-  primary_document: string;
-  primary_description: string;
-  filed_at: string;
-  available_at: string;
-  available_precision: string;
-  source_version_digest: string;
-  contract_digest: string;
-  attempt_count: number;
-  next_attempt_at: string;
-}
+const SecFilingQueueRowSchema = z.object({
+  native_id: z.string(),
+  cik: z.string(),
+  accession: z.string(),
+  issuer_json: z.string(),
+  form: z.string(),
+  primary_document: z.string(),
+  primary_description: z.string(),
+  filed_at: z.string(),
+  available_at: z.string(),
+  available_precision: z.enum(["second", "day"]),
+  source_version_digest: z.string(),
+  contract_digest: z.string(),
+  attempt_count: z.number().int().nonnegative(),
+  next_attempt_at: z.string(),
+});
+type SecFilingQueueRow = z.infer<typeof SecFilingQueueRowSchema>;
 
 function parseSecFilingQueueRow(row: SecFilingQueueRow): SecFilingWork {
   const issuer = SecQueueIssuerSchema.parse(JSON.parse(row.issuer_json));
@@ -972,7 +994,6 @@ function parseSecFilingQueueRow(row: SecFilingQueueRow): SecFilingWork {
     || !/^[a-f0-9]{64}$/.test(row.source_version_digest)
     || !/^[a-f0-9]{64}$/.test(row.contract_digest)
     || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0
-    || !["second", "day"].includes(row.available_precision)
     || !/^[A-Za-z0-9._-]+$/.test(row.primary_document)) {
     throw new Error("Stored SEC filing work failed domain validation.");
   }
@@ -986,7 +1007,7 @@ function parseSecFilingQueueRow(row: SecFilingQueueRow): SecFilingWork {
     primaryDescription: row.primary_description,
     filedAt: InstantTextSchema.parse(row.filed_at),
     availableAt: InstantTextSchema.parse(row.available_at),
-    availablePrecision: row.available_precision as "second" | "day",
+    availablePrecision: row.available_precision,
     sourceVersionDigest: row.source_version_digest,
     contractDigest: row.contract_digest,
     attemptCount: row.attempt_count,

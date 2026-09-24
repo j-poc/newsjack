@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { applyD1Migrations } from "cloudflare:test";
 import { EventSchema, IssuerSchema, nowIso, type Event } from "../src/domain";
 import { ProviderFailure, type CaptureRecord, type WorkerEnv } from "../worker/types";
+import { createCloudflareWorkerEnv, type CloudflareBindings } from "../worker/cloudflare-storage";
 import { InvestorRepository, type SecFilingQueueInput } from "../worker/repository";
 import { fetchCaptured } from "../worker/capture";
 import { RequestBudget } from "../worker/types";
@@ -10,11 +11,12 @@ import { screenSource } from "../worker/typesafe";
 import { screeningContractDigest } from "../worker/typesafe";
 import worker from "../worker/index";
 
-interface TestEnv extends WorkerEnv {
+interface TestEnv extends CloudflareBindings {
   TEST_MIGRATIONS: Array<{ name: string; queries: string[] }>;
 }
 
 const testEnv = env as unknown as TestEnv;
+const workerEnv = (bindings: CloudflareBindings = testEnv): WorkerEnv => createCloudflareWorkerEnv(bindings);
 
 beforeAll(async () => {
   await applyD1Migrations(testEnv.DB, testEnv.TEST_MIGRATIONS);
@@ -101,7 +103,7 @@ describe("private investor Worker", () => {
       source: { ...secEvent.source, provider: "finnhub_news", nativeId: "FINNHUB:EXMPL:42" },
       evidence: secEvent.evidence.map((evidence) => ({ ...evidence, label: "Finnhub company news", sourceNativeId: "FINNHUB:EXMPL:42" })),
     });
-    const repository = new InvestorRepository({ ...testEnv, FINNHUB_PROCESSING_APPROVED: "false" }, ownerId);
+    const repository = new InvestorRepository(workerEnv({ ...testEnv, FINNHUB_PROCESSING_APPROVED: "false" }), ownerId);
     await commitRefresh(repository, {
       ...refreshWrite(historicalFinnhubEvent, nowIso()),
       health: [{
@@ -142,7 +144,7 @@ describe("private investor Worker", () => {
       source: { ...secEvent.source, provider: "finnhub_news", nativeId: "FINNHUB:EXMPL:quarantined-review" },
       evidence: secEvent.evidence.map((evidence) => ({ ...evidence, sourceNativeId: "FINNHUB:EXMPL:quarantined-review" })),
     });
-    const repository = new InvestorRepository({ ...testEnv, FINNHUB_PROCESSING_APPROVED: "false" }, ownerId);
+    const repository = new InvestorRepository(workerEnv({ ...testEnv, FINNHUB_PROCESSING_APPROVED: "false" }), ownerId);
     await commitRefresh(repository, refreshWrite(historicalFinnhubEvent, nowIso()));
 
     const response = await worker.fetch(jsonRequest(`/api/events/${encodeURIComponent(historicalFinnhubEvent.id)}/review`, ownerId, {
@@ -160,7 +162,7 @@ describe("private investor Worker", () => {
   it("saves review state atomically and preserves it through duplicate and older source replays", async () => {
     const ownerId = "investor-review";
     const record = sampleEvent();
-    const repository = new InvestorRepository(testEnv, ownerId);
+    const repository = new InvestorRepository(workerEnv(), ownerId);
     const firstRefresh = refreshWrite(record, nowIso());
     await commitRefresh(repository, firstRefresh);
 
@@ -189,7 +191,7 @@ describe("private investor Worker", () => {
   });
 
   it("serializes refresh ownership with an expiring compare-and-set lock", async () => {
-    const repository = new InvestorRepository(testEnv, "investor-lock");
+    const repository = new InvestorRepository(workerEnv(), "investor-lock");
     const now = nowIso();
     expect(await repository.acquireRefreshLock("token-a", now)).toBe(true);
     expect(await repository.acquireRefreshLock("token-b", now)).toBe(false);
@@ -207,7 +209,7 @@ describe("private investor Worker", () => {
 
   it("fences stale refresh commits inside the D1 result batch", async () => {
     const ownerId = "investor-lock-fence";
-    const repository = new InvestorRepository(testEnv, ownerId);
+    const repository = new InvestorRepository(workerEnv(), ownerId);
     const staleStartedAt = new Date(Date.now() - 6 * 60 * 1000).toISOString();
     const now = nowIso();
     expect(await repository.acquireRefreshLock("stale-token", staleStartedAt)).toBe(true);
@@ -230,7 +232,7 @@ describe("private investor Worker", () => {
       headers: { "content-type": "application/json" },
     })));
     const body = await fetchCaptured(
-      testEnv,
+      workerEnv(),
       "investor-capture",
       "typesafe_ai",
       "capture-redaction-test",
@@ -251,7 +253,7 @@ describe("private investor Worker", () => {
     vi.stubGlobal("fetch", providerFetch);
     const budget = new RequestBudget(2);
     let beforeRequestCalls = 0;
-    await expect(screenSource({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }, {
+    await expect(screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
       ownerId: "investor-budget-deferral",
       provider: "sec",
       nativeId: "SEC:0000000001:0000000001-26-000001",
@@ -287,7 +289,7 @@ describe("private investor Worker", () => {
     }));
 
     const captures: CaptureRecord[] = [];
-    const result = await screenSource({ ...testEnv, TYPESAFE_API_KEY: apiKey }, {
+    const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: apiKey }), {
       ownerId: "investor-typesafe",
       provider: "sec",
       nativeId: "SEC:0000000001:000000000000000001",
@@ -650,7 +652,7 @@ describe("private investor Worker", () => {
 
   it("replays partially committed SEC discovery chunks without advancing the cursor early", async () => {
     const ownerId = "investor-sec-queue-chunks";
-    const repository = new InvestorRepository(testEnv, ownerId);
+    const repository = new InvestorRepository(workerEnv(), ownerId);
     const now = nowIso();
     const lockToken = crypto.randomUUID();
     expect(await repository.acquireRefreshLock(lockToken, now)).toBe(true);
@@ -671,7 +673,7 @@ describe("private investor Worker", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     }) as D1Database;
-    const failingRepository = new InvestorRepository({ ...testEnv, DB: failingDb }, ownerId);
+    const failingRepository = new InvestorRepository(workerEnv({ ...testEnv, DB: failingDb }), ownerId);
     await expect(failingRepository.queueSecFilings("public", filings, capture, lockToken, now))
       .rejects.toThrow("injected second-batch failure");
     const partial = await testEnv.DB.prepare("SELECT COUNT(*) AS count FROM sec_filing_queue WHERE owner_id = ?")
@@ -705,7 +707,7 @@ describe("private investor Worker", () => {
 
   it("does not let a later SEC discovery chunk renew a lock after the original lease expired", async () => {
     const ownerId = "investor-sec-queue-expired-chunk-lock";
-    const repository = new InvestorRepository(testEnv, ownerId);
+    const repository = new InvestorRepository(workerEnv(), ownerId);
     const now = nowIso();
     const oldToken = crypto.randomUUID();
     expect(await repository.acquireRefreshLock(oldToken, now)).toBe(true);
@@ -725,7 +727,7 @@ describe("private investor Worker", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     }) as D1Database;
-    const clockAdvancingRepository = new InvestorRepository({ ...testEnv, DB: clockAdvancingDb }, ownerId);
+    const clockAdvancingRepository = new InvestorRepository(workerEnv({ ...testEnv, DB: clockAdvancingDb }), ownerId);
 
     vi.useFakeTimers();
     try {
@@ -778,7 +780,7 @@ describe("private investor Worker", () => {
 
   it("limits watchlist backlog to currently watched companies and restores it on re-add", async () => {
     const ownerId = "investor-sec-watchlist-queue";
-    const repository = new InvestorRepository(testEnv, ownerId);
+    const repository = new InvestorRepository(workerEnv(), ownerId);
     const now = nowIso();
     const lockToken = crypto.randomUUID();
     expect(await repository.acquireRefreshLock(lockToken, now)).toBe(true);
@@ -804,7 +806,7 @@ describe("private investor Worker", () => {
 
   it("serves an unscreened accession before repeated older revalidations", async () => {
     const ownerId = "investor-sec-priority";
-    const repository = new InvestorRepository(testEnv, ownerId);
+    const repository = new InvestorRepository(workerEnv(), ownerId);
     const now = nowIso();
     const token = crypto.randomUUID();
     expect(await repository.acquireRefreshLock(token, now)).toBe(true);
@@ -826,7 +828,7 @@ describe("private investor Worker", () => {
 
   it("does not bypass issuer backoff through fresh public rotation", async () => {
     const ownerId = "investor-sec-backoff";
-    const repository = new InvestorRepository(testEnv, ownerId);
+    const repository = new InvestorRepository(workerEnv(), ownerId);
     const now = nowIso();
     const token = crypto.randomUUID();
     expect(await repository.acquireRefreshLock(token, now)).toBe(true);
@@ -1042,7 +1044,7 @@ describe("private investor Worker", () => {
 
   it("stores independent screening runs for changed prompt/model contracts on identical source bytes", async () => {
     const ownerId = "investor-contract-version";
-    const repository = new InvestorRepository(testEnv, ownerId);
+    const repository = new InvestorRepository(workerEnv(), ownerId);
     const firstContract = await screeningContractDigest("sec");
     const secondContract = `${firstContract.slice(0, -1)}${firstContract.endsWith("0") ? "1" : "0"}`;
     const shared = {

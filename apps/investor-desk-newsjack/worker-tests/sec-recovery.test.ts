@@ -4,13 +4,15 @@ import { applyD1Migrations } from "cloudflare:test";
 import { fetchCaptured, readCaptured } from "../worker/capture";
 import { InvestorRepository, type SecFilingQueueInput, type SecQueueIssuer } from "../worker/repository";
 import { RequestBudget, type WorkerEnv } from "../worker/types";
+import { createCloudflareWorkerEnv, type CloudflareBindings } from "../worker/cloudflare-storage";
 import worker from "../worker/index";
 
-interface TestEnv extends WorkerEnv {
+interface TestEnv extends CloudflareBindings {
   TEST_MIGRATIONS: Array<{ name: string; queries: string[] }>;
 }
 
 const testEnv = env as unknown as TestEnv;
+const workerEnv = (bindings: CloudflareBindings = testEnv): WorkerEnv => createCloudflareWorkerEnv(bindings);
 
 beforeAll(async () => {
   await applyD1Migrations(testEnv.DB, testEnv.TEST_MIGRATIONS);
@@ -44,7 +46,7 @@ describe("SEC recovery guards", () => {
     })));
 
     const captured = await fetchCaptured(
-      testEnv,
+      workerEnv(),
       ownerId,
       "sec",
       `submissions:${cik}`,
@@ -52,7 +54,7 @@ describe("SEC recovery guards", () => {
       { headers: { "User-Agent": "Newsjack test contact: test@example.invalid" } },
       new RequestBudget(2),
     );
-    const repository = new InvestorRepository(testEnv, ownerId);
+    const repository = new InvestorRepository(workerEnv(), ownerId);
     const lockToken = crypto.randomUUID();
     expect(await repository.acquireRefreshLock(lockToken, new Date().toISOString())).toBe(true);
 
@@ -77,7 +79,7 @@ describe("SEC recovery guards", () => {
           return typeof value === "function" ? value.bind(target) : value;
         },
       }) as D1Database;
-      const failingRepository = new InvestorRepository({ ...testEnv, DB: failingDb }, ownerId);
+      const failingRepository = new InvestorRepository(workerEnv({ ...testEnv, DB: failingDb }), ownerId);
       const discoveredAt = new Date().toISOString();
       await expect(failingRepository.queueSecFilings(
         "public",
@@ -102,7 +104,7 @@ describe("SEC recovery guards", () => {
       await testEnv.BUCKET.put(captured.capture.objectKey, new TextEncoder().encode(corruptedText), {
         customMetadata: { provider: "sec", sha256: captured.capture.sha256 },
       });
-      await expect(readCaptured(testEnv, ownerId, captured.capture)).rejects.toMatchObject({
+      await expect(readCaptured(workerEnv(), ownerId, captured.capture)).rejects.toMatchObject({
         provider: "sec",
         stage: "replay_capture_digest",
       });
@@ -190,7 +192,7 @@ describe("SEC recovery guards", () => {
       expect(partialFailureInjected).toBe(true);
       expect(submissionsFetches).toBe(1);
 
-      const repository = new InvestorRepository(testEnv, ownerId);
+      const repository = new InvestorRepository(workerEnv(), ownerId);
       const replay = await repository.getSecDiscoveryReplay("watchlist", cik);
       expect(replay).not.toBeNull();
       expect(Date.parse(replay!.capture.observedAt)).toBe(originalObservedAt.getTime());
@@ -233,7 +235,7 @@ describe("SEC recovery guards", () => {
     const budget = new RequestBudget(1);
 
     await expect(fetchCaptured(
-      testEnv,
+      workerEnv(),
       crypto.randomUUID(),
       "typesafe_ai",
       "screening:before-request-storage-error",

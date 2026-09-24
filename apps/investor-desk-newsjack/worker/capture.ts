@@ -1,4 +1,4 @@
-import { ProviderFailure, type CaptureRecord, type WorkerEnv, type RequestBudget } from "./types";
+import { ProviderFailure, type CaptureRecord, type StoredCapture, type WorkerEnv, type RequestBudget } from "./types";
 
 const MAX_RAW_BYTES = 12 * 1024 * 1024;
 const ADAPTER_VERSION = "newsjack-worker-1";
@@ -33,7 +33,7 @@ export async function fetchCaptured(
   budget.take();
   let response: Response;
   try {
-    response = await fetch(input, { ...init, signal: init.signal ?? AbortSignal.timeout(25_000) });
+    response = await fetch(input, { ...init, signal: init.signal ?? AbortSignal.timeout(budget.timeoutMs()) });
   } catch {
     throw new ProviderFailure(provider, "network", `${providerLabel(provider)} could not be reached.`);
   }
@@ -58,8 +58,8 @@ export async function fetchCaptured(
   const objectKey = `raw/${ownerHash}/${provider}/${nativeHash}/${sha256}.bin`;
 
   try {
-    await env.BUCKET.put(objectKey, bytes, {
-      httpMetadata: { contentType },
+    await env.CAPTURES.put(objectKey, bytes, {
+      contentType,
       customMetadata: { provider, nativeHash, sha256, observedAt, adapterVersion: ADAPTER_VERSION },
     });
   } catch {
@@ -98,9 +98,9 @@ export async function readCaptured(env: WorkerEnv, ownerId: string, capture: Cap
     throw new ProviderFailure("sec", "replay_identity", "The SEC discovery replay points outside its owner-scoped capture.");
   }
 
-  let object: R2ObjectBody | null;
+  let object: StoredCapture | null;
   try {
-    object = await env.BUCKET.get(capture.objectKey);
+    object = await env.CAPTURES.get(capture.objectKey);
   } catch {
     throw new ProviderFailure("sec", "replay_capture_unavailable", "The retained SEC discovery response could not be read.");
   }

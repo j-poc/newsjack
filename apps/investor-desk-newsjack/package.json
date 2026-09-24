@@ -11,10 +11,13 @@
     "dev": "concurrently -k \"tsx server/index.ts\" \"vite\"",
     "build": "pnpm typecheck && pnpm typecheck:worker && pnpm build:assets && pnpm build:worker",
     "build:assets": "vite build",
+    "build:assets:vercel": "vite build --config vite.vercel.config.ts",
     "build:worker": "vite build --config vite.worker.config.ts",
+    "build:vercel": "pnpm typecheck && pnpm typecheck:worker && pnpm typecheck:vercel && pnpm build:assets:vercel",
     "start": "tsx server/index.ts",
     "typecheck": "tsc --noEmit --pretty false",
     "typecheck:worker": "tsc --project tsconfig.worker.json --noEmit --pretty false",
+    "typecheck:vercel": "tsc --project tsconfig.vercel.json --noEmit --pretty false",
     "db:generate": "drizzle-kit generate",
     "test": "pnpm test:unit && pnpm test:worker",
     "test:unit": "vitest run --exclude worker-tests/**",
@@ -22,6 +25,7 @@
     "verify": "pnpm typecheck && pnpm test && pnpm build"
   },
   "dependencies": {
+    "@libsql/client": "0.18.0",
     "@vitejs/plugin-react": "6.1.1",
     "better-sqlite3": "13.0.3",
     "concurrently": "10.0.5",

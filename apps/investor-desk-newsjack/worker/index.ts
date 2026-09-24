@@ -7,6 +7,7 @@ import {
 } from "../src/domain";
 import { InvestorRepository } from "./repository";
 import { refreshLiveSources, searchIssuers } from "./providers";
+import { createCloudflareWorkerEnv, type CloudflareBindings } from "./cloudflare-storage";
 import type { WorkerEnv } from "./types";
 import { z } from "zod";
 
@@ -15,11 +16,21 @@ const REFRESH_INTERVAL_MS = 60 * 1000;
 const EventIdSchema = z.string().min(1).max(400).regex(/^[a-z0-9:_-]+$/i);
 
 const worker = {
-  async fetch(request: Request, env: WorkerEnv): Promise<Response> {
+  async fetch(request: Request, bindings: CloudflareBindings): Promise<Response> {
     const url = new URL(request.url);
-    if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
-    const ownerId = request.headers.get("oai-authenticated-user-id")?.trim() ?? "";
-    if (!isValidOwnerId(ownerId)) return json({ error: "Sign in through the private Newsjack Site to access this desk." }, 401);
+    if (!url.pathname.startsWith("/api/")) return bindings.ASSETS.fetch(request);
+    return handleApiRequest(request, createCloudflareWorkerEnv(bindings), readOwnerId(request), "private-worker");
+  },
+} satisfies ExportedHandler<CloudflareBindings>;
+
+export async function handleApiRequest(
+  request: Request,
+  env: WorkerEnv,
+  ownerId: string,
+  runtime: "private-worker" | "private-vercel" = "private-worker",
+): Promise<Response> {
+    const url = new URL(request.url);
+    if (!isValidOwnerId(ownerId)) return json({ error: "Sign in through the private Newsjack deployment to access this desk." }, 401);
     if (request.method !== "GET" && !isSameOriginWrite(request, url)) return json({ error: "This request did not come from the Newsjack Site." }, 403);
 
     const repository = new InvestorRepository(env, ownerId);
@@ -29,7 +40,7 @@ const worker = {
           status: "ok",
           service: "newsjack-investor-desk",
           at: nowIso(),
-          runtime: "private-worker",
+          runtime,
           configured: {
             typesafe: Boolean(env.TYPESAFE_API_KEY?.trim()),
             finnhub: Boolean(env.FINNHUB_PROCESSING_APPROVED === "true" && env.FINNHUB_API_KEY?.trim()),
@@ -52,7 +63,7 @@ const worker = {
       }
 
       if (request.method === "POST" && url.pathname === "/api/refresh") {
-        return await refresh(request, env, repository);
+        return await refresh(request, env, repository, ownerId);
       }
 
       if (request.method === "POST" && url.pathname === "/api/watchlist") {
@@ -91,12 +102,11 @@ const worker = {
     } catch {
       return json({ error: "The request could not finish. A save may already have completed. Reload the desk to confirm its saved state before retrying." }, 500);
     }
-  },
-} satisfies ExportedHandler<WorkerEnv>;
+}
 
 export default worker;
 
-async function refresh(request: Request, env: WorkerEnv, repository: InvestorRepository): Promise<Response> {
+async function refresh(request: Request, env: WorkerEnv, repository: InvestorRepository, ownerId: string): Promise<Response> {
   const body = await readJson(request);
   if (body instanceof Response) return body;
   const parsed = RefreshRequestSchema.safeParse(body);
@@ -129,7 +139,7 @@ async function refresh(request: Request, env: WorkerEnv, repository: InvestorRep
   }
   try {
     await repository.recordRefreshAttempt(now);
-    const result = await refreshLiveSources(env, readOwnerId(request), repository, parsed.data.source, lockToken);
+    const result = await refreshLiveSources(env, ownerId, repository, parsed.data.source, lockToken);
     await repository.recordRefresh(result, lockToken);
     const snapshot = await repository.getSnapshot();
     if (result.failures.length > 0 && result.events.length === 0) {

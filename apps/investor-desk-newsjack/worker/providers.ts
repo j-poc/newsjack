@@ -195,7 +195,7 @@ export async function refreshLiveSources(
     ownerId,
     lockToken,
     repository,
-    budget: new RequestBudget(45),
+    budget: new RequestBudget(45, env.REQUEST_BUDGET_MS),
     screeningContractDigest: activeScreeningContract,
     result: {
       events: [], captures: [], screenings: [], health: [], meta: [], failures: [], refreshedAt,
