@@ -128,12 +128,15 @@ type investorSourceFailure struct {
 }
 
 type investorScreenResult struct {
-	Answers      map[string]any
-	Model        string
-	InputTokens  int
-	OutputTokens int
-	LatencyMS    int64
-	Err          error
+	Answers           map[string]any
+	Model             string
+	InputTokens       int
+	OutputTokens      int
+	LatencyMS         int64
+	Err               error
+	FirstReadSentence string
+	FirstReadSelected bool
+	FirstReadReason   string
 }
 
 type investorScore struct {

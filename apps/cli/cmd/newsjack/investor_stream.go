@@ -270,18 +270,19 @@ type investorPendingDeep struct {
 }
 
 type investorStreamState struct {
-	Version     int                            `json:"version"`
-	Coarse      map[string]string              `json:"coarse"`
-	Deep        map[string]string              `json:"deep"`
-	PendingDeep map[string]investorPendingDeep `json:"pending_deep"`
+	Version        int                            `json:"version"`
+	Coarse         map[string]string              `json:"coarse"`
+	Deep           map[string]string              `json:"deep"`
+	ContractDigest string                         `json:"contract_digest"`
+	PendingDeep    map[string]investorPendingDeep `json:"pending_deep"`
 }
 
 func investorStreamStatePath(cacheDir string) string {
 	return cacheDir + "/stream-state.json"
 }
 
-func investorLoadStreamState(cacheDir string) investorStreamState {
-	state := investorStreamState{Version: 1, Coarse: map[string]string{}, Deep: map[string]string{}, PendingDeep: map[string]investorPendingDeep{}}
+func investorLoadStreamState(cacheDir, contractDigest string) investorStreamState {
+	state := investorStreamState{Version: 1, ContractDigest: contractDigest, Coarse: map[string]string{}, Deep: map[string]string{}, PendingDeep: map[string]investorPendingDeep{}}
 	if cacheDir == "" {
 		return state
 	}
@@ -291,6 +292,11 @@ func investorLoadStreamState(cacheDir string) investorStreamState {
 	}
 	var parsed investorStreamState
 	if json.Unmarshal(raw, &parsed) != nil || parsed.Coarse == nil || parsed.Deep == nil || parsed.PendingDeep == nil {
+		return state
+	}
+	// A screening-contract change invalidates every prior verdict: the whole
+	// stream re-screens under the new contract instead of trusting stale marks.
+	if parsed.ContractDigest != contractDigest {
 		return state
 	}
 	parsed.Version = 1
@@ -349,7 +355,7 @@ func scanInvestorStream(since time.Time, watchlist investorWatchlist, opts inves
 	sort.Strings(formList)
 	directory, _, _ := fetchInvestorTickerDirectory(opts)
 
-	state := investorLoadStreamState(opts.CacheDir)
+	state := investorLoadStreamState(opts.CacheDir, sha256Hex(investorQuestionsJSON))
 	var rows []investorIndexRow
 	var indexFailures []investorSourceFailure
 	today := observed.Truncate(24 * time.Hour)

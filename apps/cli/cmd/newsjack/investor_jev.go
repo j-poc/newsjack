@@ -89,7 +89,22 @@ func screenInvestorFilings(filings []investorFiling, watchlist investorWatchlist
 				if filing.SourceProvider != "finnhub_news" {
 					questionSet = investorQuestionsWithoutCompanyRelevance(questions)
 				}
-				results[index] = investorScreenResultFromClient(client.judge(state, questionSet))
+				baseQuestionSet := questionSet
+				var summaryPlan *investorSummaryPlan
+				if filing.SourceProvider != "finnhub_news" && filing.Text != "" {
+					if plan := investorPlanSummaryQuestions(filing.Text, !filing.TextComplete); plan != nil {
+						summaryPlan = plan
+						questionSet = investorMergeSummaryQuestion(questionSet, plan)
+					}
+				}
+				result := investorScreenResultFromClient(client.judge(state, questionSet))
+				if summaryPlan != nil && result.Err == nil {
+					outcome := investorResolveSummary(client, state, summaryPlan, result.Answers, baseQuestionSet)
+					result.FirstReadSentence = outcome.Sentence
+					result.FirstReadSelected = outcome.Selected
+					result.FirstReadReason = outcome.Reason
+				}
+				results[index] = result
 			}
 		}()
 	}
@@ -868,15 +883,26 @@ func investorItemFromScreen(filing investorFiling, result investorScreenResult, 
 	attention := investorAttentionScore(score, evidenceComplete)
 	lane := investorLane(attention, score.Confidence, evidenceComplete)
 	title := ""
+	headlineProvenance := ""
 	if filing.CompletenessReason == "index_metadata_only" {
 		title = firstString(strings.TrimSpace(filing.PrimaryDescription), filing.Form+" filing")
+	} else if result.FirstReadSelected {
+		title = investorCompressHeadline(investorFinishSummaryHeadline(result.FirstReadSentence), filing.Issuer.Name)
+		headlineProvenance = "The first-read headline is an exact source sentence selected by TypeSafe AI; envelope boilerplate was trimmed."
 	} else {
-		title = investorCompressHeadline(investorSummaryHeadline(filing), filing.Issuer.Name)
+		// An abstention or an unusable selection withholds the generated
+		// headline entirely: the record keeps its plain description and the
+		// reason stays in the rationale. No heuristic sentence is substituted.
+		title = firstString(strings.TrimSpace(filing.PrimaryDescription), filing.Form+" filing")
+		if result.FirstReadReason != "" {
+			headlineProvenance = result.FirstReadReason
+		}
 	}
-	rationale := []string{
-
-		fmt.Sprintf("TypeSafe AI classified this filing as %s.", category),
+	rationale := []string{}
+	if headlineProvenance != "" {
+		rationale = append(rationale, headlineProvenance)
 	}
+	rationale = append(rationale, fmt.Sprintf("TypeSafe AI classified this filing as %s.", category))
 	if filing.CompletenessReason == "index_metadata_only" {
 		rationale = append(rationale, "First pass: judged on filing metadata only. Open the source document for full evidence.")
 	}
