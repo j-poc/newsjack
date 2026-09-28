@@ -1,0 +1,64 @@
+{
+  "checks": [
+    {
+      "exit_code": 0,
+      "id": "worker_pipeline_fixtures",
+      "kind": "fixture",
+      "output_bytes": 1739,
+      "output_digest": "f6db1b22cb5aee5c0cad3e37ee70676d404ce34d26fa59c6d7897a2de474caf7",
+      "started_at": "2026-09-23T16:46:08Z",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 0,
+      "id": "go_integration_and_fixture",
+      "kind": "fixture",
+      "output_bytes": 62,
+      "output_digest": "9dbe71705c5d3132f17d83fb838be386efccfbea1af4c7587ef1b3da6fbf5bb2",
+      "started_at": "2026-09-23T16:46:11Z",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 0,
+      "id": "provider_challenge_and_pagination_failure",
+      "kind": "failure",
+      "output_bytes": 1750,
+      "output_digest": "cee3ed2de68642eef5c5ba2d2e79603933bdb12ee5f08861658ef17e5c01f50f",
+      "started_at": "2026-09-23T16:46:17Z",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 0,
+      "id": "clean_process_replay_normalization",
+      "kind": "replay",
+      "output_bytes": 62,
+      "output_digest": "9a5594dbf90eb36401445981b66590e03f2b3e4fcdc807bca007b0e07549527a",
+      "started_at": "2026-09-23T16:46:19Z",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 0,
+      "id": "live_federal_typesafe_smoke",
+      "kind": "live_smoke",
+      "output_bytes": 8213,
+      "output_digest": "6c71815d7854d0d051c1febbd99f8ff5df16ceb6c2ecc9851a86a511d5362c9f",
+      "started_at": "2026-09-23T16:46:19Z",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 1,
+      "id": "live_public_sec_typesafe_smoke",
+      "kind": "live_smoke",
+      "output_bytes": 1716,
+      "output_digest": "7e4e2cc889163215d386309e276cf91e4f8e58accd758a7f7c91bf9d4ee152e8",
+      "started_at": "2026-09-23T16:46:21Z",
+      "status": "FAIL"
+    }
+  ],
+  "code_fingerprint": "39ec79f81e35ffab032b46ef912150cfccaefc52111f34f90be6ba153aa63454",
+  "contract_digest": "bbe0fc415371397163270a247493041834fbca23624c69d0f48dd36e29b6ab4b",
+  "schema_version": 1,
+  "standard_digest": "fe78a13d120391194e64380061e71e750cf30782de85a223837b722700729a90",
+  "status": "FAIL",
+  "verified_at": "2026-09-23T16:46:22Z"
+}

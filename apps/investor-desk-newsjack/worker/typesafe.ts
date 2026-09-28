@@ -16,7 +16,7 @@ import {
   type Subject,
   type TypedAnswer,
 } from "../src/domain";
-import investorQuestions from "../../cli/cmd/newsjack/investor_questions.json";
+import investorQuestions from "./investor_questions.json";
 import { CapturedProviderFailure, digestHex, fetchCaptured, type CapturedBody } from "./capture";
 import { ProviderFailure, RequestBudget, type CaptureRecord, type WorkerEnv } from "./types";
 import { z } from "zod";

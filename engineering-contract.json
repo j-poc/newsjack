@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "job": "As the sole authorized investor, open a private Newsjack-style desk and receive a live, source-linked SEC/Federal Register first-read queue screened by TypeSafe AI; search public companies by name/ticker, curate a watchlist, and preserve review state without mistaking model judgment for investment advice.",
+  "acceptance": [
+    "The investor desk is built on the existing Newsjack fork, follows the supplied editorial reference composition, has functional review controls, retains the useful local CLI, and never shows demo/seed records.",
+    "Opening the desk loads durable state and begins a bounded real-source refresh; later open-session intervals resume persisted slices. No refresh-while-closed claim is made.",
+    "The SEC directory powers name/ticker search; the full searchable issuer universe, rolling filing scan, and personal watchlist are distinct and explicit.",
+    "Federal Register retrieval requests selected fields, validates count/page metadata, reads no more than five 1,000-result pages per refresh, and exposes omitted/malformed pages as degraded; its informational rendition points users to the official govinfo edition.",
+    "TypeSafe typed judgments are validated and source-bound; TypeSafe selects a first-read headline from every eligible sentence in the bounded captured source rather than generating unsupported prose or silently sampling candidates away. Upstream clipping is explicit and the final candidate is discarded even when it ends in punctuation; long documents use bounded exhaustive group selection followed by exact-sentence selection. Failed or invalid second-stage output is withheld for retry; an exceeded coverage bound abstains and requires human review. Source facts, model judgment, deterministic categories/ranking, evidence completeness, and human review remain separate.",
+    "Vercel Authentication protects production and preview deployments; the Vercel project remains owner-only, Worker routes ignore caller-supplied identity headers, and a fixed server-side owner key scopes Turso watchlist, cursor, source-health, review, and capture data. Preview deployments receive no production database credentials.",
+    "External work is bounded and failures are actionable. SEC, Federal Register, and TypeSafe delivery/check status are independently visible; no unavailable or incomplete source appears current.",
+    "TypeSafe and SEC contact values stay server-side in Vercel production-only sensitive environment variables; Finnhub content requests remain disabled until provider rights and explicit third-party TypeSafe processing permission are established. No EODHD/Bloomberg source is called, no paid tier/resource or overage is enabled, and no credential or restricted capture enters the public fork.",
+    "The exact reviewed source revision is pushed to the existing fork, deployed to the owner-private Vercel project without widening its audience or cost, and the production workflow is verified with real sources and durable state in Codex's native browser.",
+    "Already-discovered SEC accessions survive the seven-day application filter in owner-scoped durable work state; discovery checkpoints advance only after obligations are persisted; failed issuers and filings retry fairly; duplicate replay preserves screening lineage and human review; stale refresh owners cannot commit.",
+    "Event history is delivered in 20-record ranked pages with exact totals and a 96 KiB per-event storage bound; 1,500 records traverse exactly once; refresh/watchlist revision changes reject old cursors and offer reload rather than silently dropping or repeating records; review notes and in-progress drafts survive the corresponding page/reload workflow."
+  ],
+  "owner": "Jurgis owns product decisions and final acceptance; Codex owns implementation, integration, verification, and authorized release operations.",
+  "design": {
+    "existing_patterns": "Retain the Newsjack editorial visual vocabulary, typed React API/domain contract, local Go CLI and Express/SQLite path, source-native identities/timing, TypeSafe structured prompts, and deterministic scoring boundaries.",
+    "data_ownership": "Vercel Node functions own provider transport and auth perimeter. Turso owns the single-investor watchlist, reviews, event versions, health, cursors, and private content-addressed raw captures. TypeSafe owns typed judgment; code owns ranking; the investor owns the decision. Finnhub is rights-gated and remains off.",
+    "boundaries": "The React client calls same-origin routes protected by Vercel Authentication for all deployments. The Vercel project is single-owner; the server uses a fixed owner namespace and ignores caller identity headers. Turso credentials exist only in production-only sensitive Vercel env vars. SEC/Federal source payloads and TypeSafe outputs are validated at ingress; observations, judgments, ranking, and user review remain separate.",
+    "simplicity": "Keep the current hosted Worker domain logic and Vite client, adapting only the runtime boundary to Vercel Node functions and the prior Worker storage contract to remote libSQL/Turso. Keep local CLI behavior. Make schema migrations idempotent, use atomic short libSQL write batches, and retain raw captures in bounded database BLOB storage only after verifying payload limits. Bound refresh duration below the Hobby function ceiling and reserve time to persist checkpoints. Event pages use a ranked keyset cursor bound to an atomic catalog revision; any source/watchlist change invalidates the cursor explicitly, avoiding offset drift and a durable duplicate ranking table. TypeSafe selects a first-read headline from the complete eligible sentence set in the bounded source: direct choice for smaller sets, otherwise exhaustive contiguous groups followed by exact-sentence choice. Explicit truncation removes the final sentence regardless of punctuation; code validates every selected source option and owns deterministic categories and ranking. Valid summary abstentions stay visible for human review. Production credentials are unavailable to previews. No second identity system, paid source, paid resource, or speculative orchestration."
+  },
+  "change_safety": {
+    "checkpoint": "Preserve the existing dirty investor implementation on codex/investor-release. Review the full diff, explicit staged paths, built client assets, dependency results, and secret scan. Keep private captures, environment values, and operational credentials out of the public fork.",
+    "rollback": "Deploy only the reviewed private Vercel version; retain the previous deployment and additive, idempotent Turso migrations. Roll back the application without deleting Turso user state. The former ChatGPT-hosted site is not the release target."
+  },
+  "risks": {
+    "shared_users": false,
+    "persistent_data": true,
+    "sensitive_data": true,
+    "paid_services": false,
+    "external_integrations": true,
+    "background_work": true,
+    "public_release": true
+  },
+  "checks": [
+    {
+      "id": "investor_ui_tests",
+      "covers": ["workflow_success", "workflow_failure", "change_review"],
+      "command": ["env", "PATH=/Users/jurgis/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:/Users/jurgis/Library/pnpm:/opt/homebrew/bin:/usr/bin:/bin", "PNPM_HOME=/private/tmp/newsjack-pnpm-home", "XDG_DATA_HOME=/private/tmp/newsjack-pnpm-data", "npm_config_manage_package_manager_versions=false", "/Users/jurgis/Library/pnpm/pnpm", "--dir", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/investor-desk-newsjack", "test:unit"],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "investor_worker_tests",
+      "covers": ["workflow_success", "workflow_failure", "authorization", "persistence_recovery", "resource_bounds", "integration_failure", "concurrency", "operations", "change_review"],
+      "command": ["env", "PATH=/Users/jurgis/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:/Users/jurgis/Library/pnpm:/opt/homebrew/bin:/usr/bin:/bin", "PNPM_HOME=/private/tmp/newsjack-pnpm-home", "XDG_DATA_HOME=/private/tmp/newsjack-pnpm-data", "XDG_CONFIG_HOME=/private/tmp/newsjack-wrangler-config", "XDG_CACHE_HOME=/private/tmp/newsjack-wrangler-cache", "WRANGLER_LOG_PATH=/private/tmp/newsjack-wrangler-logs", "npm_config_manage_package_manager_versions=false", "/Users/jurgis/Library/pnpm/pnpm", "--dir", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/investor-desk-newsjack", "test:worker"],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "investor_app_typescript",
+      "covers": ["change_review", "workflow_success"],
+      "command": ["env", "PATH=/Users/jurgis/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:/Users/jurgis/Library/pnpm:/opt/homebrew/bin:/usr/bin:/bin", "PNPM_HOME=/private/tmp/newsjack-pnpm-home", "XDG_DATA_HOME=/private/tmp/newsjack-pnpm-data", "npm_config_manage_package_manager_versions=false", "/Users/jurgis/Library/pnpm/pnpm", "--dir", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/investor-desk-newsjack", "typecheck"],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "investor_worker_typescript",
+      "covers": ["change_review", "workflow_success"],
+      "command": ["env", "PATH=/Users/jurgis/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:/Users/jurgis/Library/pnpm:/opt/homebrew/bin:/usr/bin:/bin", "PNPM_HOME=/private/tmp/newsjack-pnpm-home", "XDG_DATA_HOME=/private/tmp/newsjack-pnpm-data", "npm_config_manage_package_manager_versions=false", "/Users/jurgis/Library/pnpm/pnpm", "--dir", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/investor-desk-newsjack", "typecheck:worker"],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "investor_client_build",
+      "covers": ["workflow_success", "operations", "change_review"],
+      "command": ["env", "PATH=/Users/jurgis/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:/Users/jurgis/Library/pnpm:/opt/homebrew/bin:/usr/bin:/bin", "PNPM_HOME=/private/tmp/newsjack-pnpm-home", "XDG_DATA_HOME=/private/tmp/newsjack-pnpm-data", "npm_config_manage_package_manager_versions=false", "/Users/jurgis/Library/pnpm/pnpm", "--dir", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/investor-desk-newsjack", "build:assets:vercel"],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "investor_worker_build",
+      "covers": ["workflow_success", "operations", "change_review"],
+      "command": ["env", "PATH=/Users/jurgis/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:/Users/jurgis/Library/pnpm:/opt/homebrew/bin:/usr/bin:/bin", "PNPM_HOME=/private/tmp/newsjack-pnpm-home", "XDG_DATA_HOME=/private/tmp/newsjack-pnpm-data", "npm_config_manage_package_manager_versions=false", "/Users/jurgis/Library/pnpm/pnpm", "--dir", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/investor-desk-newsjack", "build:worker"],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "newsjack_go_regression_suite",
+      "covers": ["workflow_success", "workflow_failure", "integration_failure", "change_review"],
+      "command": ["env", "GOCACHE=/private/tmp/newsjack-go-cache", "GOMODCACHE=/private/tmp/newsjack-go-mod-cache", "GOPATH=/private/tmp/newsjack-go-path", "go", "-C", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/cli", "test", "./..."],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "public_source_secret_scan",
+      "covers": ["secret_scan", "change_review"],
+      "command": ["/opt/homebrew/bin/gitleaks", "dir", "--redact=100", "--no-banner", "."],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "production_dependency_audit",
+      "covers": ["dependency_review"],
+      "command": ["env", "PATH=/Users/jurgis/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:/Users/jurgis/Library/pnpm:/opt/homebrew/bin:/usr/bin:/bin", "PNPM_HOME=/private/tmp/newsjack-pnpm-home", "XDG_DATA_HOME=/private/tmp/newsjack-pnpm-data", "npm_config_manage_package_manager_versions=false", "/Users/jurgis/Library/pnpm/pnpm", "--dir", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/investor-desk-newsjack", "audit", "--audit-level", "high"],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "investor_pagination_acceptance",
+      "covers": ["resource_bounds", "persistence_recovery", "workflow_success", "change_review"],
+      "command": ["env", "PATH=/Users/jurgis/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:/Users/jurgis/Library/pnpm:/opt/homebrew/bin:/usr/bin:/bin", "PNPM_HOME=/private/tmp/newsjack-pnpm-home", "XDG_DATA_HOME=/private/tmp/newsjack-pnpm-data", "XDG_CONFIG_HOME=/private/tmp/newsjack-wrangler-config", "XDG_CACHE_HOME=/private/tmp/newsjack-wrangler-cache", "WRANGLER_LOG_PATH=/private/tmp/newsjack-wrangler-logs", "npm_config_manage_package_manager_versions=false", "/Users/jurgis/Library/pnpm/pnpm", "--dir", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/investor-desk-newsjack", "exec", "vitest", "run", "server/db.test.ts", "server/turso-adapter.test.ts", "src/App.pagination.test.tsx", "--pool=threads", "--maxWorkers=1"],
+      "timeout_seconds": 120
+    }
+  ],
+  "alignment": {
+    "request": "Build a real investor product from the user's GitHub Newsjack fork, matching the provided rough News Desk Dealer UI; automatically produce evidence-grounded first-read headlines and categories through TypeSafe AI; cover public-company and federal filings; let users find companies without knowing CIK; do not use paid EODHD/Bloomberg; use GitHub/private publishing when useful; and inspect the finished UI in Codex's native browser. No demo data. The user authorized encrypted app-only runtime secret transfer; this does not authorize restricted-source processing. Original visual reference and user's authorized clarifications are recorded in project-record/3-project-specs/2026-09-investor-release.md.",
+    "acceptance_checks": [
+      {"acceptance_index": 0, "check_ids": ["investor_ui_tests", "investor_client_build"]},
+      {"acceptance_index": 1, "check_ids": ["investor_worker_tests", "investor_worker_build"]},
+      {"acceptance_index": 2, "check_ids": ["investor_ui_tests", "investor_worker_tests", "newsjack_go_regression_suite"]},
+      {"acceptance_index": 3, "check_ids": ["investor_worker_tests"]},
+      {"acceptance_index": 4, "check_ids": ["investor_worker_tests", "investor_ui_tests"]},
+      {"acceptance_index": 5, "check_ids": ["investor_worker_tests"]},
+      {"acceptance_index": 6, "check_ids": ["investor_worker_tests", "public_source_secret_scan"]},
+      {"acceptance_index": 7, "check_ids": ["public_source_secret_scan", "investor_client_build", "investor_worker_build"]},
+      {"acceptance_index": 8, "check_ids": ["investor_worker_tests", "investor_client_build", "investor_worker_build"]},
+      {"acceptance_index": 9, "check_ids": ["investor_worker_tests", "investor_worker_typescript"]},
+      {"acceptance_index": 10, "check_ids": ["investor_pagination_acceptance", "investor_client_build"]}
+    ],
+    "artifacts": ["project-record/3-project-specs/newsjack-style-reference.png"],
+    "review": ".engineering-evidence/alignment-review.json"
+  }
+}

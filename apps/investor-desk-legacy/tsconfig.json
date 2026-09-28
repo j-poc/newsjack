@@ -10,13 +10,12 @@
     "strict": true,
     "forceConsistentCasingInFileNames": true,
     "module": "ESNext",
-    "allowImportingTsExtensions": true,
+    "moduleResolution": "Bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "types": ["node", "vite/client"]
+    "types": ["vitest/globals", "node"]
   },
-  "include": ["src", "server", "vite.config.ts", "drizzle.config.ts"],
-  "exclude": ["server/turso-adapter.test.ts"]
+  "include": ["src", "server", "vite.config.ts", "vitest.config.ts"]
 }

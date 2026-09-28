@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "applicability": "required",
+  "reason": "The investor desk depends on current SEC and Federal Register records, and validated TypeSafe AI judgments, before it can populate the first-read queue.",
+  "live_claim": true,
+  "max_evidence_age_hours": 24,
+  "sources": [
+    {
+      "id": "sec_edgar",
+      "delivery_states": ["network", "cache"],
+      "freshness_states": ["current", "delayed", "stale", "unknown"],
+      "freshness_budget_seconds": 1200,
+      "timing_fields": ["observation", "retrieved", "publication", "availability"],
+      "revision_policy": "Identify a filing by SEC CIK/accession/primary document. Capture directory, submission, and primary-document responses before normalization; persist raw digest, provider-native identity, adapter version, filed date, SEC availability time/precision, retrieval/observation time, and app ingestion time separately. Public discovery rotates through the complete validated SEC exchange directory in small bounded slices; one refresh is not a scan of every issuer. Already-discovered accessions persist in the owner-scoped retry queue beyond the seven-day discovery filter, and watchlist eligibility is evaluated against the current owner watchlist.",
+      "rights": "retained",
+      "consumer_paths": ["apps/cli/cmd/newsjack investor scan", "apps/investor-desk-newsjack/worker/providers.ts", "apps/investor-desk-newsjack/src/App.tsx"]
+    },
+    {
+      "id": "federal_register",
+      "delivery_states": ["network", "cache"],
+      "freshness_states": ["current", "delayed", "stale", "unknown"],
+      "freshness_budget_seconds": 1200,
+      "timing_fields": ["observation", "retrieved", "publication", "availability"],
+      "revision_policy": "Identify by Federal Register document number and official record URL. Preserve API publication date at day precision separately from retrieval/observation. Capture selected-field index pages and document bodies by digest before normalization. Validate count, total_pages, next_page_url type, stable page count, and document schema; read at most five 1,000-result pages per refresh. Any unread page or malformed record degrades the slice; FederalRegister.gov rendition is informational and must not be represented as the official legal edition.",
+      "rights": "reference_only",
+      "consumer_paths": ["apps/cli/cmd/newsjack investor scan --source federal", "apps/investor-desk-newsjack/worker/providers.ts", "apps/investor-desk-newsjack/src/App.tsx"]
+    },
+    {
+      "id": "typesafe_ai",
+      "delivery_states": ["network", "cache"],
+      "freshness_states": ["current", "stale", "unknown"],
+      "freshness_budget_seconds": 1200,
+      "timing_fields": ["observation", "retrieved"],
+      "revision_policy": "Bind each typed answer to source provider/native ID/digest, the digest of exact state and dynamic questions for every TypeSafe stage, stable screening-contract digest, model ID, request/retrieval time, and run identity. Validate every required answer and each first-read sentence-choice ID against the captured source. Offer all eligible sentences from the bounded text: direct Choice for smaller sets; otherwise exhaustive contiguous groups followed by an exact sentence Choice. Carry upstream truncation explicitly and discard the boundary sentence even when it ends in punctuation. Preserve every TypeSafe response capture; a failed or malformed second stage withholds the entire screening for retry. A valid abstention or exceeded coverage bound remains summary-unavailable and forces human review. Deterministic application code owns score/category/lane, and no cached model result may replace a changed source digest without a new run.",
+      "rights": "restricted",
+      "consumer_paths": ["apps/cli/cmd/newsjack TypeSafe transport", "apps/investor-desk-newsjack/worker/typesafe.ts", "apps/investor-desk-newsjack/src/App.tsx"]
+    }
+  ],
+  "checks": [
+    {
+      "id": "worker_pipeline_fixtures",
+      "kind": "fixture",
+      "required": true,
+      "command": ["env", "PATH=/Users/jurgis/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:/Users/jurgis/Library/pnpm:/opt/homebrew/bin:/usr/bin:/bin", "PNPM_HOME=/private/tmp/newsjack-pnpm-home", "XDG_DATA_HOME=/private/tmp/newsjack-pnpm-data", "XDG_CONFIG_HOME=/private/tmp/newsjack-wrangler-config", "XDG_CACHE_HOME=/private/tmp/newsjack-wrangler-cache", "WRANGLER_LOG_PATH=/private/tmp/newsjack-wrangler-logs", "npm_config_manage_package_manager_versions=false", "/Users/jurgis/Library/pnpm/pnpm", "--dir", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/investor-desk-newsjack", "test:worker"],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "go_integration_and_fixture",
+      "kind": "fixture",
+      "required": true,
+      "command": ["env", "GOCACHE=/private/tmp/newsjack-go-cache", "GOMODCACHE=/private/tmp/newsjack-go-mod-cache", "GOPATH=/private/tmp/newsjack-go-path", "go", "-C", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/cli", "test", "./..."],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "provider_challenge_and_pagination_failure",
+      "kind": "failure",
+      "required": true,
+      "command": ["env", "PATH=/Users/jurgis/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:/Users/jurgis/Library/pnpm:/opt/homebrew/bin:/usr/bin:/bin", "PNPM_HOME=/private/tmp/newsjack-pnpm-home", "XDG_DATA_HOME=/private/tmp/newsjack-pnpm-data", "XDG_CONFIG_HOME=/private/tmp/newsjack-wrangler-config", "XDG_CACHE_HOME=/private/tmp/newsjack-wrangler-cache", "WRANGLER_LOG_PATH=/private/tmp/newsjack-wrangler-logs", "npm_config_manage_package_manager_versions=false", "/Users/jurgis/Library/pnpm/pnpm", "--dir", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/investor-desk-newsjack", "test:worker"],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "clean_process_replay_normalization",
+      "kind": "replay",
+      "required": true,
+      "command": ["env", "GOCACHE=/private/tmp/newsjack-go-cache", "GOMODCACHE=/private/tmp/newsjack-go-mod-cache", "GOPATH=/private/tmp/newsjack-go-path", "go", "-C", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/cli", "test", "./cmd/newsjack", "-run", "TestInvestorNormalizationPreservesSourceTimeAndBoundsText"],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "live_federal_typesafe_smoke",
+      "kind": "live_smoke",
+      "required": true,
+      "command": ["env", "GOCACHE=/private/tmp/newsjack-go-cache", "GOMODCACHE=/private/tmp/newsjack-go-mod-cache", "GOPATH=/private/tmp/newsjack-go-path", "NEWSJACK_FINNHUB_PROCESSING_APPROVED=false", "go", "-C", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/cli", "run", "./cmd/newsjack", "investor", "scan", "--source", "federal", "--since", "2026-09-18T00:00:00Z", "--run-dir", "/private/tmp/newsjack-live-data-etl-federal-smoke", "--max-filings-per-issuer", "1", "--max-document-chars", "4000", "--concurrency", "1", "--timeout", "20s"],
+      "timeout_seconds": 120
+    },
+    {
+      "id": "live_public_sec_typesafe_smoke",
+      "kind": "live_smoke",
+      "required": true,
+      "command": ["env", "GOCACHE=/private/tmp/newsjack-go-cache", "GOMODCACHE=/private/tmp/newsjack-go-mod-cache", "GOPATH=/private/tmp/newsjack-go-path", "NEWSJACK_FINNHUB_PROCESSING_APPROVED=false", "go", "-C", "/Users/jurgis/Documents/Codex/2026-09-21/what-are-your-thoughts-on-these/upstream/apps/cli", "run", "./cmd/newsjack", "investor", "scan", "--source", "all_public", "--auto", "--since", "2026-09-18T00:00:00Z", "--run-dir", "/private/tmp/newsjack-live-data-etl-sec-smoke", "--max-issuers", "2", "--max-filings-per-issuer", "1", "--max-document-chars", "4000", "--concurrency", "1", "--timeout", "30s"],
+      "timeout_seconds": 120
+    }
+  ],
+  "evidence_path": "project-record/4-log/live-data-etl-evidence.json"
+}

@@ -1,0 +1,61 @@
+{
+  "materiality": {
+    "type": "score",
+    "instructions": "Score how materially the captured filing text could change an analyst's understanding of the issuer's business, financial position, capital allocation, governance, or risk. Score observed evidence only; do not infer a price move. If filing.document_complete is false or exhibits_not_captured is true, unprovided content is unknown, not evidence of absence; keep the result provisional for human review.",
+    "criteria": [
+      "No material information or routine administrative detail.",
+      "Minor update with limited decision relevance.",
+      "Meaningful update, but unlikely to change a core research view alone.",
+      "Material change to an important business, financial, governance, or risk assumption.",
+      "Potentially thesis-changing or highly consequential disclosure with direct primary evidence."
+    ]
+  },
+  "novelty": {
+    "type": "score",
+    "instructions": "Score how much genuinely new information the captured filing text adds relative to the ordinary cadence of the issuer. Judge novelty from observed text, not from an assumed market reaction. If filing.document_complete is false or exhibits_not_captured is true, unprovided content is unknown, not evidence of absence; keep the result provisional for human review.",
+    "criteria": [
+      "No new information; duplicate, amendment without substantive change, or routine boilerplate.",
+      "Mostly expected or repetitive information.",
+      "Some new facts, but mixed with routine disclosure.",
+      "Clearly new development or changed fact pattern.",
+      "Unusually new, unexpected, or first-order disclosure."
+    ]
+  },
+  "market_sensitivity": {
+    "type": "score",
+    "instructions": "Score how directly the captured filing text speaks to facts that investors commonly reassess, such as cash flows, guidance, financing, major contracts, regulation, leadership, or legal exposure. Do not forecast the direction or magnitude of a return. If filing.document_complete is false or exhibits_not_captured is true, unprovided content is unknown, not evidence of absence; keep the result provisional for human review.",
+    "criteria": [
+      "No identifiable market-relevant fact.",
+      "Indirect or low-sensitivity information.",
+      "Relevant information with limited immediate sensitivity.",
+      "Directly relevant to a major operating, financial, strategic, or risk variable.",
+      "Direct disclosure about a major variable likely to be reassessed by investors."
+    ]
+  },
+  "thesis_link": {
+    "type": "score",
+    "instructions": "Score whether the captured filing text directly informs the analyst's explicitly stated research focus or thesis context. If no thesis context is supplied, score relevance to the watchlist mandate rather than inventing one. If filing.document_complete is false or exhibits_not_captured is true, unprovided content is unknown, not evidence of absence; keep the result provisional for human review.",
+    "criteria": [
+      "No connection to the stated focus or mandate.",
+      "Remote or speculative connection.",
+      "Plausible connection, but evidence is incomplete or indirect.",
+      "Clear connection to a stated research focus.",
+      "Directly tests, updates, or challenges a stated thesis question."
+    ]
+  },
+  "category": {
+    "type": "choice",
+    "instructions": "Choose the primary research category supported by the captured filing text and issuer metadata. Choose routine_disclosure when no more specific category is supported by the observed evidence. If filing.document_complete is false or exhibits_not_captured is true, unprovided content is unknown, not evidence of absence; the result remains provisional for human review.",
+    "criteria": {
+      "operations": "Revenue, demand, products, capacity, customers, suppliers, or operating performance",
+      "capital_allocation": "Financing, debt, liquidity, capital returns, acquisitions, or investment spending",
+      "governance_legal": "Leadership, board, shareholder matters, litigation, regulation, or compliance",
+      "risk_disclosure": "Material risk, incident, control weakness, security, safety, or adverse exposure",
+      "routine_disclosure": "A routine filing with no clearly dominant research category"
+    }
+  },
+  "company_relevance": {
+    "type": "noul",
+    "instructions": "Is this individual news story substantively about the target public company identified by `subject.name` and `subject.code`, rather than merely returned by a ticker query, sharing ticker letters, mentioning the company in passing, or principally covering a different company? Judge both the captured source headline in `filing.primary_description` and the available summary in `filing.document_text`. If the headline is a market roundup and the target appears only as one item or a passing mention, answer no; do not treat a single sentence in a roundup as a target-company story. Answer yes only when the target company's own action, results, exposure, strategy, products, leadership, or material relationship is a meaningful subject of this specific article. If the summary is incomplete or the target cannot be distinguished, answer no."
+  }
+}

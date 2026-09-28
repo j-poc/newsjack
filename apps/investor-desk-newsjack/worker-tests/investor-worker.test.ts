@@ -2129,3 +2129,17 @@ function choiceCriteria(body: RequestInit["body"], questionId: string): Record<s
   const question = z.object({ criteria: z.record(z.string(), z.unknown()) }).safeParse(payload.questions[questionId]);
   return question.success ? question.data.criteria : undefined;
 }
+
+// The Worker embeds the investor questions contract; the Go pipeline owns the
+// original. When the monorepo is present, the embedded copy must match it.
+describe("embedded investor questions parity", () => {
+  it("matches the Go pipeline's investor_questions.json when the monorepo is present", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const original = path.resolve(__dirname, "../../cli/cmd/newsjack/investor_questions.json");
+    if (!fs.existsSync(original)) return; // deployment checkouts carry only the app
+    const embedded = JSON.parse(fs.readFileSync(path.resolve(__dirname, "./investor_questions.json"), "utf8"));
+    const source = JSON.parse(fs.readFileSync(original, "utf8"));
+    expect(embedded).toEqual(source);
+  });
+});

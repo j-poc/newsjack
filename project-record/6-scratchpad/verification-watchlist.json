@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issuers": [
+    { "cik": "0000320193", "ticker": "AAPL", "name": "Apple Inc." }
+  ],
+  "screen": {
+    "include_forms": ["8-K", "8-K/A", "10-Q", "10-Q/A", "10-K", "10-K/A"],
+    "research_focus": ["material operating, financing, governance, or legal changes"]
+  }
+}
