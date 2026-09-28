@@ -16,7 +16,7 @@ import {
   type Subject,
   type TypedAnswer,
 } from "../src/domain.js";
-import investorQuestions from "./investor_questions.json";
+import investorQuestions from "./investor_questions.json" with { type: "json" };
 import { CapturedProviderFailure, digestHex, fetchCaptured, type CapturedBody } from "./capture.js";
 import { ProviderFailure, RequestBudget, type CaptureRecord, type WorkerEnv } from "./types.js";
 import { z } from "zod";
