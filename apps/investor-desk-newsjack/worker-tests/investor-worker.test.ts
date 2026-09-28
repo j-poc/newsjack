@@ -1383,10 +1383,14 @@ describe("private investor Worker", () => {
   });
 
   it("drains multiple unscreened SEC accessions for one issuer across bounded refreshes", async () => {
+    // Filing dates are relative to now: the seven-day recency window would
+    // otherwise silently drop the oldest accession as calendar time passes.
+    const daysAgo = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const compact = (date: string) => date.replaceAll("-", "") + "160000";
     const filings = [
-      { accession: "0000001234-26-000003", date: "2026-09-23", acceptance: "20260923160000", document: "current.htm" },
-      { accession: "0000001234-26-000002", date: "2026-09-22", acceptance: "20260922160000", document: "prior.htm" },
-      { accession: "0000001234-26-000001", date: "2026-09-21", acceptance: "20260921160000", document: "earlier.htm" },
+      { accession: "0000001234-26-000003", date: daysAgo(1), acceptance: compact(daysAgo(1)), document: "current.htm" },
+      { accession: "0000001234-26-000002", date: daysAgo(2), acceptance: compact(daysAgo(2)), document: "prior.htm" },
+      { accession: "0000001234-26-000001", date: daysAgo(3), acceptance: compact(daysAgo(3)), document: "earlier.htm" },
     ];
     let typeSafeCalls = 0;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

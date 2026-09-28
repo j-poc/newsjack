@@ -511,7 +511,9 @@ async function processSecQueue(
   requestedLimit: number,
 ): Promise<SecQueueProcessResult> {
   const limit = Math.max(0, Math.min(MAX_SEC_FILINGS_PER_REFRESH, requestedLimit, Math.floor(pipeline.budget.remaining / 3)));
+  console.log("DEBUG queue: requested", requestedLimit, "budgetRemaining", pipeline.budget.remaining, "limit", limit, "MAX", MAX_SEC_FILINGS_PER_REFRESH);
   if (limit === 0) return { successfulRequests: 0, recordsScreened: 0, recordsPlaced: 0 };
+  console.log("DEBUG queue: proceeding");
   let filings: SecFilingWork[];
   try {
     filings = await pipeline.repository.getDueSecFilings(
@@ -522,6 +524,7 @@ async function processSecQueue(
       2,
       pipeline.lockToken,
     );
+    console.log("DEBUG queue: due filings", filings.length, JSON.stringify(filings.map((f) => f.nativeId)));
   } catch (error) {
     const message = errorMessage(error, "SEC filing backlog could not be loaded.");
     rememberFailure(pipeline, error);
