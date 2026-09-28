@@ -1,5 +1,5 @@
-import { createCloudflareWorkerEnv, type CloudflareBindings } from "./cloudflare-storage";
-import { handleApiRequest } from "./handler";
+import { createCloudflareWorkerEnv, type CloudflareBindings } from "./cloudflare-storage.js";
+import { handleApiRequest } from "./handler.js";
 
 const worker = {
   async fetch(request: Request, bindings: CloudflareBindings): Promise<Response> {

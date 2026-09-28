@@ -1,5 +1,5 @@
-import { createSqlDatabase, type SqlExecutor } from "./storage";
-import type { CaptureMetadata, SqlQuery, SqlResult, StoredCapture, WorkerEnv, WorkerSecrets } from "./types";
+import { createSqlDatabase, type SqlExecutor } from "./storage.js";
+import type { CaptureMetadata, SqlQuery, SqlResult, StoredCapture, WorkerEnv, WorkerSecrets } from "./types.js";
 
 export interface CloudflareBindings extends WorkerSecrets {
   DB: D1Database;

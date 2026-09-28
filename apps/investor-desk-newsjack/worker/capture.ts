@@ -1,4 +1,4 @@
-import { ProviderFailure, type CaptureRecord, type StoredCapture, type WorkerEnv, type RequestBudget } from "./types";
+import { ProviderFailure, type CaptureRecord, type StoredCapture, type WorkerEnv, type RequestBudget } from "./types.js";
 
 const MAX_RAW_BYTES = 12 * 1024 * 1024;
 const ADAPTER_VERSION = "newsjack-worker-1";

@@ -90,3 +90,6 @@ tmp/
 
 # Local runtime state: SQLite store and the pinned Go module cache used by the investor scan.
 apps/investor-desk-newsjack/data/
+
+# Bundled Vercel API functions (build artifacts)
+apps/investor-desk-newsjack/api/**/*.js

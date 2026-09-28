@@ -18,8 +18,8 @@ import {
   type SourceHealth,
   type WatchlistEntry,
   nextReviewUpdatedAt,
-} from "../src/domain";
-import type { CaptureRecord, SqlStatement, WorkerEnv } from "./types";
+} from "../src/domain.js";
+import type { CaptureRecord, SqlStatement, WorkerEnv } from "./types.js";
 import { z } from "zod";
 
 const STALE_AFTER_MS = 20 * 60 * 1000;

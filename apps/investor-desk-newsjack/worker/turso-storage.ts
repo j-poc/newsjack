@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
 import type { Client, InValue } from "@libsql/client";
 import { z } from "zod";
-import { createSqlDatabase, type SqlExecutor } from "./storage";
-import type { CaptureMetadata, CaptureStore, SqlInput, SqlQuery, SqlResult, StoredCapture, WorkerEnv, WorkerSecrets } from "./types";
+import { createSqlDatabase, type SqlExecutor } from "./storage.js";
+import type { CaptureMetadata, CaptureStore, SqlInput, SqlQuery, SqlResult, StoredCapture, WorkerEnv, WorkerSecrets } from "./types.js";
 
 const MAX_CAPTURE_BYTES = 12 * 1024 * 1024;
 const MAX_STORED_CAPTURE_BYTES = 3 * 1024 * 1024;

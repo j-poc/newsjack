@@ -15,10 +15,10 @@ import {
   type Screening,
   type Subject,
   type TypedAnswer,
-} from "../src/domain";
+} from "../src/domain.js";
 import investorQuestions from "./investor_questions.json";
-import { CapturedProviderFailure, digestHex, fetchCaptured, type CapturedBody } from "./capture";
-import { ProviderFailure, RequestBudget, type CaptureRecord, type WorkerEnv } from "./types";
+import { CapturedProviderFailure, digestHex, fetchCaptured, type CapturedBody } from "./capture.js";
+import { ProviderFailure, RequestBudget, type CaptureRecord, type WorkerEnv } from "./types.js";
 import { z } from "zod";
 
 const MODEL = "jev-latest";

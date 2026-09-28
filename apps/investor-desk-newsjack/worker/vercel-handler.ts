@@ -1,9 +1,9 @@
 import { createClient } from "@libsql/client";
 import { join } from "node:path";
-import { handleApiRequest } from "./handler";
-import { applyTursoMigrations } from "./turso-migrations";
-import { createTursoWorkerEnv } from "./turso-storage";
-import type { WorkerEnv } from "./types";
+import { handleApiRequest } from "./handler.js";
+import { applyTursoMigrations } from "./turso-migrations.js";
+import { createTursoWorkerEnv } from "./turso-storage.js";
+import type { WorkerEnv } from "./types.js";
 
 export const VERCEL_PRIVATE_OWNER_ID = "newsjack-private-investor-v1";
 

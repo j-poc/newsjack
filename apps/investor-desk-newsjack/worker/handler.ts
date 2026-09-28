@@ -5,10 +5,10 @@ import {
   EventScopeSchema,
   IssuerSchema,
   nowIso,
-} from "../src/domain";
-import { EventPageError, InvestorRepository } from "./repository";
-import { refreshLiveSources, searchIssuers } from "./providers";
-import type { WorkerEnv } from "./types";
+} from "../src/domain.js";
+import { EventPageError, InvestorRepository } from "./repository.js";
+import { refreshLiveSources, searchIssuers } from "./providers.js";
+import type { WorkerEnv } from "./types.js";
 import { z } from "zod";
 
 const MAX_REQUEST_BODY_BYTES = 16 * 1024;

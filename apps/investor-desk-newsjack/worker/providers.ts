@@ -16,9 +16,9 @@ import {
   type IssuerSearchResult,
   type SourceHealth,
   type Subject,
-} from "../src/domain";
+} from "../src/domain.js";
 import { z } from "zod";
-import { CapturedProviderFailure, digestHex, fetchCaptured, readCaptured, type CapturedBody } from "./capture";
+import { CapturedProviderFailure, digestHex, fetchCaptured, readCaptured, type CapturedBody } from "./capture.js";
 import {
   InvestorRepository,
   type ScreeningRunRecord,
@@ -27,9 +27,9 @@ import {
   type SecQueueIssuer,
   type SecQueueScope,
   type SecQueueTransition,
-} from "./repository";
-import { screeningContractDigest as getScreeningContractDigest, screenSource, type ScreeningResult } from "./typesafe";
-import { ProviderFailure, RequestBudget, type CaptureRecord, type WorkerEnv } from "./types";
+} from "./repository.js";
+import { screeningContractDigest as getScreeningContractDigest, screenSource, type ScreeningResult } from "./typesafe.js";
+import { ProviderFailure, RequestBudget, type CaptureRecord, type WorkerEnv } from "./types.js";
 
 const SEC_DIRECTORY_URL = "https://www.sec.gov/files/company_tickers_exchange.json";
 const SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/";

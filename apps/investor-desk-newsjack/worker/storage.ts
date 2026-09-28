@@ -1,5 +1,5 @@
 import { z, type ZodType } from "zod";
-import type { SqlDatabase, SqlInput, SqlQuery, SqlResult, SqlStatement } from "./types";
+import type { SqlDatabase, SqlInput, SqlQuery, SqlResult, SqlStatement } from "./types.js";
 
 export interface SqlExecutor {
   first(query: SqlQuery): Promise<unknown | null>;
