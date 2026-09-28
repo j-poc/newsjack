@@ -28,7 +28,7 @@ import {
   type SecQueueScope,
   type SecQueueTransition,
 } from "./repository";
-import { screeningContractDigest as getScreeningContractDigest, screenSource } from "./typesafe";
+import { screeningContractDigest as getScreeningContractDigest, screenSource, type ScreeningResult } from "./typesafe";
 import { ProviderFailure, RequestBudget, type CaptureRecord, type WorkerEnv } from "./types";
 
 const SEC_DIRECTORY_URL = "https://www.sec.gov/files/company_tickers_exchange.json";
@@ -242,14 +242,15 @@ export async function searchIssuers(
   ownerId: string,
   repository: InvestorRepository,
   query: string,
+  options: { bypassCache?: boolean } = {},
 ): Promise<IssuerSearchResult[]> {
   const normalized = query.trim().toLowerCase();
   if (normalized.length < 2 || normalized.length > 80) return [];
   const captures: CaptureRecord[] = [];
-  const budget = new RequestBudget(8);
+  const budget = new RequestBudget(8, env.REQUEST_BUDGET_MS);
   let directory: SecIssuer[];
   try {
-    if (cachedSecDirectory !== null && Date.now() < cachedSecDirectory.expiresAt) {
+    if (!options.bypassCache && cachedSecDirectory !== null && Date.now() < cachedSecDirectory.expiresAt) {
       directory = cachedSecDirectory.entries;
     } else {
       directory = await fetchSecDirectory(env, ownerId, budget, captures, false);
@@ -582,7 +583,7 @@ async function processSecFiling(pipeline: Pipeline, filing: SecFilingWork): Prom
       cik: { kind: "cik", value: filing.cik },
     });
     const snippet = text.slice(0, MAX_SEC_TEXT_CHARS);
-    const summary = summarySentence(snippet) ?? `${filing.issuer.ticker} filed a ${filing.form} containing new disclosure.`;
+    const sourceTruncated = text.length > snippet.length;
     let screeningFailure: unknown;
     const screened = await screenOne(pipeline, {
       provider: "sec",
@@ -592,6 +593,7 @@ async function processSecFiling(pipeline: Pipeline, filing: SecFilingWork): Prom
       form: filing.form,
       sourceTitle: filing.primaryDescription,
       sourceText: snippet,
+      sourceTruncated,
       sourceUrl: documentUrl,
       sourceObservedAt: observedAt,
       sourceAvailableAt: filing.availableAt,
@@ -615,7 +617,7 @@ async function processSecFiling(pipeline: Pipeline, filing: SecFilingWork): Prom
         kind: "filing",
         form: filing.form,
         sourceTitle: filing.primaryDescription,
-        title: summary,
+        title: firstReadTitle(screened.firstReadSummary),
         summary: truncate(snippet, 1200),
         publishedAt: filing.filedAt,
         publishedPrecision: "day",
@@ -829,7 +831,6 @@ async function collectFederalDocument(
   }
 
   const subject = AgencySchema.parse({ kind: "agency", name: document.agencyName, code: document.agencyCode });
-  const summary = summarySentence(text) ?? `${document.agencyName} posted a ${document.type.toLowerCase()}; review the source notice.`;
   const screened = await screenOne(pipeline, {
     provider: "federal_register",
     nativeId,
@@ -857,7 +858,7 @@ async function collectFederalDocument(
       kind: "regulatory",
       form: document.type || "Federal Register",
       sourceTitle: document.title,
-      title: summary,
+      title: firstReadTitle(screened.firstReadSummary),
       summary: truncate(text, 1200),
       publishedAt: publication.value,
       publishedPrecision: "day",
@@ -1056,7 +1057,6 @@ async function collectFinnhubCompany(
   const subject = PublicCompanySchema.parse({ kind: "public_company", name: company.name, symbol: company.symbol, exchange: "US" });
   const newsText = article.summary?.trim() || article.headline;
   const publishedAt = new Date(article.datetime * 1000).toISOString();
-  const title = summarySentence(newsText) ?? `New company update for ${company.name}; open the linked story for details.`;
   const summary = truncate(newsText, 1400);
   const result = await screenOne(pipeline, {
     provider: "finnhub_news",
@@ -1090,7 +1090,7 @@ async function collectFinnhubCompany(
       kind: "news",
       form: article.source?.trim() || "Company news",
       sourceTitle: article.headline,
-      title,
+      title: firstReadTitle(result.firstReadSummary),
       summary,
       publishedAt,
       publishedPrecision: "second",
@@ -1401,7 +1401,7 @@ function makeEvent(input: {
     subject: input.subject,
     kind: input.kind,
     form: input.form,
-    title: truncate(input.title, 180),
+    title: input.title.trim(),
     summary: truncate(input.summary || input.title, 1200),
     publishedAt: input.publishedAt,
     publishedPrecision: input.publishedPrecision,
@@ -1428,6 +1428,17 @@ function makeEvent(input: {
     screening: input.screening,
     review: { status: "unreviewed", note: "", updatedAt: null },
   });
+}
+
+function firstReadTitle(summary: ScreeningResult["firstReadSummary"]): string {
+  switch (summary.kind) {
+    case "selected": return summary.sentence;
+    case "unavailable": return "Summary unavailable — open source";
+    default: {
+      const exhaustive: never = summary;
+      return exhaustive;
+    }
+  }
 }
 
 function screeningRun(
@@ -1519,6 +1530,7 @@ function htmlText(value: string): string {
       const code = Number.parseInt(raw, 16);
       return Number.isInteger(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : " ";
     })
+    .replace(/([.!?])\.(?=\s|$)/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
 }

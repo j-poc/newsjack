@@ -1,16 +1,23 @@
 import {
   AppSnapshotSchema,
+  EventCursorSchema,
+  EVENTS_PAGE_SIZE,
+  EventPageSchema,
   PublicIssuerCoverageSchema,
   EventSchema,
   SourceHealthSchema,
   WatchlistEntrySchema,
-  sortEvents,
+  encodeEventCursor,
   type AppSnapshot,
+  type EventPage,
+  type EventScope,
+  type EventCursor,
   type Event,
   type Issuer,
   type ReviewUpdate,
   type SourceHealth,
   type WatchlistEntry,
+  nextReviewUpdatedAt,
 } from "../src/domain";
 import type { CaptureRecord, SqlStatement, WorkerEnv } from "./types";
 import { z } from "zod";
@@ -36,6 +43,16 @@ const HealthRowSchema = z.object({
   message: z.string(),
   checked_at: z.string(),
 });
+const CountRowSchema = z.object({ count: z.number().int().nonnegative() }).strict();
+const RevisionRowSchema = z.object({ revision: z.number().int().nonnegative() }).strict();
+const MAX_EVENT_JSON_BYTES = 96 * 1024;
+
+export class EventPageError extends Error {
+  public constructor(public readonly status: 400 | 409 | 422, message: string) {
+    super(message);
+    this.name = "EventPageError";
+  }
+}
 
 export interface ScreeningRunRecord {
   provider: string;
@@ -690,31 +707,64 @@ export class InvestorRepository {
   }
 
   public async addWatchlist(issuer: Issuer, now: string): Promise<void> {
-    await this.env.DB.prepare(`
+    await this.env.DB.batch([
+      this.env.DB.prepare(`
       INSERT INTO watchlist (owner_id, cik, issuer_json, added_at) VALUES (?, ?, ?, ?)
       ON CONFLICT(owner_id, cik) DO UPDATE SET issuer_json = excluded.issuer_json
-    `).bind(this.ownerId, issuer.cik.value, JSON.stringify(issuer), now).run();
+      `).bind(this.ownerId, issuer.cik.value, JSON.stringify(issuer), now),
+      this.env.DB.prepare(`
+        INSERT INTO meta (owner_id, key, value, version, updated_at) VALUES (?, 'eventCatalogRevision', '1', 1, ?)
+        ON CONFLICT(owner_id, key) DO UPDATE SET value = CAST(meta.version + 1 AS TEXT), version = meta.version + 1, updated_at = excluded.updated_at
+      `).bind(this.ownerId, now),
+    ]);
   }
 
   public async removeWatchlist(issuer: Issuer): Promise<void> {
-    await this.env.DB.prepare("DELETE FROM watchlist WHERE owner_id = ? AND cik = ?").bind(this.ownerId, issuer.cik.value).run();
+    const now = new Date().toISOString();
+    await this.env.DB.batch([
+      this.env.DB.prepare("DELETE FROM watchlist WHERE owner_id = ? AND cik = ?").bind(this.ownerId, issuer.cik.value),
+      this.env.DB.prepare(`
+        INSERT INTO meta (owner_id, key, value, version, updated_at) VALUES (?, 'eventCatalogRevision', '1', 1, ?)
+        ON CONFLICT(owner_id, key) DO UPDATE SET value = CAST(meta.version + 1 AS TEXT), version = meta.version + 1, updated_at = excluded.updated_at
+      `).bind(this.ownerId, now),
+    ]);
   }
 
   public async updateReview(eventId: string, update: ReviewUpdate, now: string): Promise<boolean> {
+    const reviewUpdatedAt = nextReviewUpdatedAt(InstantTextSchema.parse(now), update.expectedReview);
     const result = await this.env.DB.prepare(`
       UPDATE events SET review_status = ?, review_note = ?, review_updated_at = ?, updated_at = ?
       WHERE owner_id = ? AND id = ?
         AND (? = 'true' OR provider <> 'finnhub_news')
+        AND review_status = ? AND review_note = ? AND review_updated_at IS ?
     `).bind(
       update.status,
       update.note,
-      now,
+      reviewUpdatedAt,
       now,
       this.ownerId,
       eventId,
       this.env.FINNHUB_PROCESSING_APPROVED === "true" ? "true" : "false",
+      update.expectedReview.status,
+      update.expectedReview.note,
+      update.expectedReview.updatedAt,
     ).run();
     return result.rowsAffected === 1;
+  }
+
+  public async getEvent(eventId: string, now = new Date()): Promise<Event | null> {
+    const row = await this.env.DB.prepare(`
+      SELECT event_json, review_status, review_note, review_updated_at FROM events
+      WHERE owner_id = ? AND id = ? AND (? = 'true' OR provider <> 'finnhub_news')
+    `).bind(this.ownerId, eventId, this.env.FINNHUB_PROCESSING_APPROVED === "true" ? "true" : "false")
+      .first(EventSnapshotRowSchema);
+    if (row === null) return null;
+    const event = EventSchema.parse(JSON.parse(row.event_json));
+    return EventSchema.parse({
+      ...event,
+      source: { ...event.source, freshness: freshnessAt(event.source.freshness, event.source.observedAt, now) },
+      review: { status: row.review_status, note: row.review_note, updatedAt: row.review_updated_at },
+    });
   }
 
   public async recordRefresh(write: RefreshWrite, lockToken: string): Promise<void> {
@@ -728,6 +778,9 @@ export class InvestorRepository {
 
     for (const eventValue of write.events) {
       const event = EventSchema.parse(eventValue);
+      if (new TextEncoder().encode(JSON.stringify(event)).byteLength > MAX_EVENT_JSON_BYTES) {
+        throw new Error("A screened event exceeded the 96 KiB storage contract; the refresh batch was not committed.");
+      }
       statements.push(this.env.DB.prepare(`
         INSERT INTO events (
           owner_id, id, provider, native_id, event_json, observed_at, review_status, review_note,
@@ -823,6 +876,15 @@ export class InvestorRepository {
       `).bind(touch.observedAt, touch.observedAt, touch.observedAt, this.ownerId, touch.nativeId,
         touch.observedAt, touch.sourceDigest, this.ownerId, lockToken, leaseExpiresAt));
     }
+    if (write.events.length > 0 || (write.secObservationTouches?.length ?? 0) > 0) {
+      statements.push(this.env.DB.prepare(`
+        INSERT INTO meta (owner_id, key, value, version, updated_at)
+        SELECT ?, 'eventCatalogRevision', '1', 1, ?
+        WHERE EXISTS (SELECT 1 FROM refresh_locks WHERE owner_id = ? AND token = ? AND expires_at = ?)
+        ON CONFLICT(owner_id, key) DO UPDATE SET
+          value = CAST(meta.version + 1 AS TEXT), version = meta.version + 1, updated_at = excluded.updated_at
+      `).bind(this.ownerId, write.refreshedAt, this.ownerId, lockToken, leaseExpiresAt));
+    }
     for (const touch of write.secScreeningTouches ?? []) {
       statements.push(this.env.DB.prepare(`
         UPDATE screening_runs_v2 SET last_validated_at = ?
@@ -891,26 +953,19 @@ export class InvestorRepository {
     if (results[0]?.rowsAffected !== 1) throw new Error("Refresh ownership expired before the result commit; no refresh writes were accepted.");
   }
 
-  public async getSnapshot(now = new Date()): Promise<AppSnapshot> {
-    const eventRows = await this.env.DB.prepare(`
-      SELECT event_json, review_status, review_note, review_updated_at
-      FROM events WHERE owner_id = ?
-    `).bind(this.ownerId).all(EventSnapshotRowSchema);
-    const events = sortEvents(eventRows.map((row) => {
-      const event = EventSchema.parse(JSON.parse(row.event_json));
-      return EventSchema.parse({
-        ...event,
-        source: { ...event.source, freshness: freshnessAt(event.source.freshness, event.source.observedAt, now) },
-        review: { status: row.review_status, note: row.review_note, updatedAt: row.review_updated_at },
-      });
-    })).filter((event) => this.env.FINNHUB_PROCESSING_APPROVED === "true" || event.source.provider !== "finnhub_news");
+  public async getSnapshot(now = new Date(), scope: EventScope = "all"): Promise<AppSnapshot> {
+    const openingRevision = await this.getEventRevision();
+    const [page, watchRows, healthRows, coverageText, lastRefreshAt] = await Promise.all([
+      this.readEventPage(scope, null, now),
+      this.env.DB.prepare("SELECT issuer_json, added_at FROM watchlist WHERE owner_id = ? ORDER BY added_at, cik")
+        .bind(this.ownerId).all(WatchlistRowSchema),
+      this.env.DB.prepare("SELECT provider, status, freshness, message, checked_at FROM source_health WHERE owner_id = ? ORDER BY provider")
+        .bind(this.ownerId).all(HealthRowSchema),
+      this.getMeta("publicIssuerCoverage"),
+      this.getMeta("lastRefreshAt"),
+    ]);
 
-    const watchRows = await this.env.DB.prepare("SELECT issuer_json, added_at FROM watchlist WHERE owner_id = ? ORDER BY added_at, cik")
-      .bind(this.ownerId).all(WatchlistRowSchema);
     const watch = watchRows.map((row) => WatchlistEntrySchema.parse({ issuer: JSON.parse(row.issuer_json), addedAt: row.added_at }));
-
-    const healthRows = await this.env.DB.prepare("SELECT provider, status, freshness, message, checked_at FROM source_health WHERE owner_id = ? ORDER BY provider")
-      .bind(this.ownerId).all(HealthRowSchema);
     const health = healthRows
       .filter((row) => this.env.FINNHUB_PROCESSING_APPROVED === "true" || row.provider !== "finnhub_news")
       .map((row) => SourceHealthSchema.parse({
@@ -930,17 +985,100 @@ export class InvestorRepository {
       }));
     }
 
-    const [coverageText, lastRefreshAt] = await Promise.all([this.getMeta("publicIssuerCoverage"), this.getMeta("lastRefreshAt")]);
     const publicIssuerCoverage = coverageText === null ? null : PublicIssuerCoverageSchema.parse(JSON.parse(coverageText));
+    if (openingRevision !== page.eventsRevision || await this.getEventRevision() !== openingRevision) {
+      throw new EventPageError(409, "The wire changed while the desk was opening. Reload to view one consistent ranking.");
+    }
     return AppSnapshotSchema.parse({
-      schemaVersion: 1,
-      events,
+      schemaVersion: 2,
+      ...page,
+      eventsScope: scope,
       watchlist: watch,
       companyCoverage: null,
       publicIssuerCoverage,
       sourceHealth: health,
       lastRefreshAt: lastRefreshAt === null ? null : InstantTextSchema.parse(lastRefreshAt),
     });
+  }
+
+  public async getEventPage(encodedCursor: string, now = new Date()): Promise<EventPage> {
+    let decoded: EventCursor;
+    try {
+      decoded = EventCursorSchema.parse(JSON.parse(decodeURIComponent(encodedCursor)));
+    } catch {
+      throw new EventPageError(400, "The records cursor is invalid. Reload the wire to start a new traversal.");
+    }
+    const revision = await this.getEventRevision();
+    if (decoded.revision !== revision) {
+      throw new EventPageError(409, "The wire changed while older records were loading. Reload the records list and continue from the updated ranking.");
+    }
+    return this.readEventPage(decoded.scope, decoded, now);
+  }
+
+  private async readEventPage(scope: EventScope, cursor: EventCursor | null, now: Date): Promise<EventPage> {
+    const revision = await this.getEventRevision();
+    if (cursor !== null && cursor.revision !== revision) {
+      throw new EventPageError(409, "The wire changed while older records were loading. Reload the records list and continue from the updated ranking.");
+    }
+    const sourceScope = scope === "federal"
+      ? "e.provider = 'federal_register'"
+      : scope === "all_public"
+        ? "e.provider = 'sec'"
+        : scope === "watchlist"
+          ? "e.provider = 'sec' AND EXISTS (SELECT 1 FROM watchlist w WHERE w.owner_id = e.owner_id AND w.cik = json_extract(e.event_json, '$.subject.cik.value'))"
+          : "1 = 1";
+    const providerScope = this.env.FINNHUB_PROCESSING_APPROVED === "true" ? "" : " AND e.provider <> 'finnhub_news'";
+    const where = `e.owner_id = ? AND (${sourceScope})${providerScope}`;
+    const score = "CAST(json_extract(e.event_json, '$.screening.attentionScore') AS INTEGER)";
+    const available = "julianday(json_extract(e.event_json, '$.availableAt'))";
+    const cursorWhere = cursor === null ? "" : ` AND (
+      ${score} < ? OR (${score} = ? AND ${available} < julianday(?))
+      OR (${score} = ? AND ${available} = julianday(?) AND e.id COLLATE BINARY > ? COLLATE BINARY)
+    )`;
+    const bindScope: Array<string | number> = [this.ownerId];
+    const count = await this.env.DB.prepare(`SELECT COUNT(*) AS count FROM events e WHERE ${where}`)
+      .bind(...bindScope).first(CountRowSchema);
+    const bindRows: Array<string | number> = [...bindScope];
+    if (cursor !== null) bindRows.push(cursor.attentionScore, cursor.attentionScore, cursor.availableAt, cursor.attentionScore, cursor.availableAt, cursor.id);
+    bindRows.push(EVENTS_PAGE_SIZE + 1);
+    const rows = await this.env.DB.prepare(`
+      SELECT e.id, e.event_json, e.review_status, e.review_note, e.review_updated_at,
+        ${score} AS attention_score, json_extract(e.event_json, '$.availableAt') AS available_at
+      FROM events e WHERE ${where}${cursorWhere}
+      ORDER BY ${score} DESC, ${available} DESC, e.id COLLATE BINARY ASC
+      LIMIT ?
+    `).bind(...bindRows).all(EventSnapshotRowSchema.extend({
+      id: z.string(),
+      attention_score: z.number().int().min(0).max(100),
+      available_at: InstantTextSchema,
+    }));
+    const events = rows.slice(0, EVENTS_PAGE_SIZE).map((row) => {
+      if (new TextEncoder().encode(row.event_json).byteLength > MAX_EVENT_JSON_BYTES) {
+        throw new EventPageError(422, `Stored record ${row.id} exceeds the supported 96 KiB event limit and was withheld. No page was partially returned; this record needs operator repair before it can be reviewed.`);
+      }
+      const event = EventSchema.parse(JSON.parse(row.event_json));
+      return EventSchema.parse({
+        ...event,
+        source: { ...event.source, freshness: freshnessAt(event.source.freshness, event.source.observedAt, now) },
+        review: { status: row.review_status, note: row.review_note, updatedAt: row.review_updated_at },
+      });
+    });
+    const hasMore = rows.length > EVENTS_PAGE_SIZE;
+    const pageEvents = events;
+    const lastEvent = pageEvents.at(-1);
+    if (await this.getEventRevision() !== revision) {
+      throw new EventPageError(409, "The wire changed while this page was loading. Reload the records list to avoid a gap.");
+    }
+    const eventsCursor = hasMore && lastEvent !== undefined
+      ? encodeEventCursor({ version: 1, revision, scope, attentionScore: lastEvent.screening.attentionScore, availableAt: lastEvent.availableAt, id: lastEvent.id })
+      : null;
+    return EventPageSchema.parse({ events: pageEvents, eventsTotal: count?.count ?? 0, eventsRevision: revision, eventsCursor });
+  }
+
+  private async getEventRevision(): Promise<number> {
+    const row = await this.env.DB.prepare("SELECT version AS revision FROM meta WHERE owner_id = ? AND key = 'eventCatalogRevision'")
+      .bind(this.ownerId).first(RevisionRowSchema);
+    return row?.revision ?? 0;
   }
 }
 

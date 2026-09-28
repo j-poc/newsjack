@@ -20,7 +20,7 @@
     "typecheck:vercel": "tsc --project tsconfig.vercel.json --noEmit --pretty false",
     "db:generate": "drizzle-kit generate",
     "test": "pnpm test:unit && pnpm test:worker",
-    "test:unit": "vitest run --exclude worker-tests/**",
+    "test:unit": "vitest run --exclude '**/worker-tests/**'",
     "test:worker": "vitest run --config vitest.worker.config.ts",
     "verify": "pnpm typecheck && pnpm test && pnpm build"
   },

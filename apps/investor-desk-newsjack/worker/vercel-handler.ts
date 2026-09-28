@@ -1,6 +1,6 @@
 import { createClient } from "@libsql/client";
 import { join } from "node:path";
-import { handleApiRequest } from "./index";
+import { handleApiRequest } from "./handler";
 import { applyTursoMigrations } from "./turso-migrations";
 import { createTursoWorkerEnv } from "./turso-storage";
 import type { WorkerEnv } from "./types";

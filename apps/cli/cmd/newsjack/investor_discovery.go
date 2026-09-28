@@ -115,7 +115,11 @@ func discoverInvestorWatchlist(since time.Time, opts investorSECScanOptions) (in
 }
 
 func defaultInvestorForms() []string {
-	return []string{"8-K", "8-K/A", "10-Q", "10-Q/A", "10-K", "10-K/A"}
+	return []string{
+		"8-K", "8-K/A", "10-Q", "10-Q/A", "10-K", "10-K/A",
+		"424B2", "424B3", "424B5", "S-1", "S-1/A", "S-3", "S-3/A", "S-4", "S-4/A",
+		"DEF 14A", "DEFA14A", "SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A",
+	}
 }
 
 func investorDailyIndexURL(day time.Time) string {

@@ -10,6 +10,19 @@ import { RequestBudget } from "../worker/types";
 import { screenSource } from "../worker/typesafe";
 import { screeningContractDigest } from "../worker/typesafe";
 import worker from "../worker/index";
+import { handleApiRequest } from "../worker/handler";
+import { z } from "zod";
+
+const TypeSafeRequestSchema = z.object({
+  state: z.object({
+    filing: z.object({
+      document_text: z.string(),
+      document_truncated: z.boolean(),
+      candidate_group: z.array(z.object({ source_sentence: z.string() })).optional(),
+    }).passthrough(),
+  }).passthrough(),
+  questions: z.record(z.string(), z.unknown()),
+}).passthrough();
 
 interface TestEnv extends CloudflareBindings {
   TEST_MIGRATIONS: Array<{ name: string; queries: string[] }>;
@@ -23,6 +36,7 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -59,6 +73,46 @@ describe("private investor Worker", () => {
       body: JSON.stringify({ action: "add", issuer: issuer() }),
     }), testEnv);
     expect(crossSite.status).toBe(403);
+  });
+
+  it("bounds SEC company-search recovery to the Vercel request deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("9999-12-31T12:00:00.000Z"));
+    const requests: string[] = [];
+    const requestTimeouts: number[] = [];
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((milliseconds) => {
+      requestTimeouts.push(milliseconds);
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), milliseconds);
+      return controller.signal;
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      requests.push(url);
+      if (url.includes("company_tickers_exchange.json")) {
+        await vi.advanceTimersByTimeAsync(25_000);
+        throw new Error("SEC directory timeout");
+      }
+      await vi.advanceTimersByTimeAsync(10_000);
+      if (init?.signal?.aborted) throw new Error("SEC identity mirror request was aborted at its deadline");
+      return new Response(JSON.stringify({ AAPL: "320193" }), {
+        headers: { "content-type": "application/json" },
+      });
+    }));
+
+    const response = await handleApiRequest(
+      new Request("https://desk.test/api/issuers/search?q=apple", { headers: { "cache-control": "no-cache" } }),
+      { ...workerEnv(), NEWSJACK_SEC_USER_AGENT: "Newsjack test contact test@example.com", REQUEST_BUDGET_MS: 45_000 },
+      "investor-search-time-budget",
+      "private-vercel",
+    );
+    const body = await response.json() as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(body.error).toBe("The live SEC issuer directory and its identity-only fallback could not be read.");
+    expect(requests).toHaveLength(2);
+    expect(requestTimeouts).toEqual([25_000, 10_000]);
+    expect(Date.now()).toBe(new Date("9999-12-31T12:00:35.000Z").getTime());
   });
 
   it("keeps watchlists isolated by authenticated owner across requests", async () => {
@@ -150,6 +204,7 @@ describe("private investor Worker", () => {
     const response = await worker.fetch(jsonRequest(`/api/events/${encodeURIComponent(historicalFinnhubEvent.id)}/review`, ownerId, {
       status: "reviewed",
       note: "This write must be blocked while the provider is quarantined.",
+      expectedReview: historicalFinnhubEvent.review,
     }), { ...testEnv, FINNHUB_PROCESSING_APPROVED: "false" });
     expect(response.status).toBe(404);
 
@@ -169,8 +224,17 @@ describe("private investor Worker", () => {
     const saved = await worker.fetch(jsonRequest(`/api/events/${encodeURIComponent(record.id)}/review`, ownerId, {
       status: "reviewed",
       note: "Check the filing against the prior quarter.",
+      expectedReview: record.review,
     }), testEnv);
     expect(saved.status).toBe(200);
+
+    const stale = await worker.fetch(jsonRequest(`/api/events/${encodeURIComponent(record.id)}/review`, ownerId, {
+      status: "dismissed",
+      note: "stale overwrite",
+      expectedReview: record.review,
+    }), testEnv);
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ event: { review: { status: "reviewed", note: "Check the filing against the prior quarter." } } });
 
     await commitRefresh(repository, firstRefresh);
     const older = EventSchema.parse({
@@ -278,12 +342,38 @@ describe("private investor Worker", () => {
     expect(providerFetch).not.toHaveBeenCalled();
   });
 
+  it("rejects TypeSafe responses that omit the required model identity", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => Response.json({
+      answers: validAnswers(init?.body),
+    })));
+    await expect(screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-typesafe-missing-model",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000001",
+      sourceDigest: "a".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText: "The issuer expanded its manufacturing plant to meet rising demand.",
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), [])).rejects.toMatchObject({
+      provider: "typesafe_ai",
+      stage: "validation",
+      message: "TypeSafe AI returned an empty or malformed typed response.",
+    });
+  });
+
   it("keeps SEC TypeSafe judgments provisional while filing exhibits are not captured", async () => {
     const apiKey = "test-token-not-a-real-key";
     const submittedBodies: unknown[] = [];
     vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       submittedBodies.push(JSON.parse(String(init?.body)));
-      return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers() }), {
+      return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers(init?.body, "candidate_1") }), {
         headers: { "content-type": "application/json" },
       });
     }));
@@ -297,7 +387,7 @@ describe("private investor Worker", () => {
       subject: issuer(),
       form: "8-K",
       sourceTitle: "Current report",
-      sourceText: "The company expanded production capacity during the quarter.",
+      sourceText: "The company expanded production capacity during the quarter. Management raised its full-year outlook after new customer commitments increased.",
       sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/000000000000000001/report.htm",
       sourceObservedAt: nowIso(),
       sourceAvailableAt: nowIso(),
@@ -311,6 +401,12 @@ describe("private investor Worker", () => {
     expect(result.screening.evidenceComplete).toBe(false);
     expect(result.screening.decision).toBe("review");
     expect(result.screening.engine).toBe("typesafe_ai");
+    expect(result.firstReadSummary).toEqual({
+      kind: "selected",
+      candidateId: "candidate_1",
+      sentence: "Management raised its full-year outlook after new customer commitments increased.",
+    });
+    expect(result.screening.typedAnswers.first_read_summary).toMatchObject({ type: "choice", choice: "candidate_1" });
     expect(captures).toHaveLength(1);
     expect(submittedBodies[0]).toMatchObject({
       state: {
@@ -320,8 +416,700 @@ describe("private investor Worker", () => {
     });
   });
 
+  it("keeps a valid TypeSafe abstention visible as an explicit human-review result", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => Response.json({
+      model: "jev-latest",
+      answers: validAnswers(init?.body, "none"),
+    })));
+    const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-abstention",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000003",
+      sourceDigest: "c".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText: "The company expanded production capacity during the quarter. Management raised its full-year outlook after new customer commitments increased.",
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(result.firstReadSummary).toEqual({ kind: "unavailable", reason: "model_abstained" });
+    expect(result.screening.typedAnswers.first_read_summary).toMatchObject({ type: "choice", choice: "none" });
+    expect(result.screening.decision).toBe("review");
+    expect(result.screening.rationale.join(" ")).toContain("kept for human review");
+  });
+
+  it("keeps a qualifying clause attached across common corporate abbreviations", async () => {
+    const completeSentence = "The company will repay all debt owed to Acme Inc. only if the proposed asset sale closes.";
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => Response.json({
+      model: "jev-latest",
+      answers: validAnswers(init?.body, "candidate_0"),
+    })));
+    const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-abbreviation",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000008",
+      sourceDigest: "a".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText: completeSentence,
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(result.firstReadSummary).toEqual({ kind: "selected", candidateId: "candidate_0", sentence: completeSentence });
+  });
+
+  it("keeps numeric and parenthetical conditions attached after abbreviations", async () => {
+    const numericCondition = "The company will repay all debt owed to Acme Inc. 30 days after the asset sale closes.";
+    const timeCondition = "The financing must close by 5 p.m. (only if the board approves).";
+    const timeZoneCondition = "The company will repay the notes by 5 p.m. Eastern Time, but only if the asset sale closes.";
+    let summaryOptions: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      summaryOptions = choiceCriteria(init?.body, "first_read_summary") ?? {};
+      return Response.json({ model: "jev-latest", answers: validAnswers(init?.body, "candidate_0") });
+    }));
+    await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-abbreviation-conditions",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000012",
+      sourceDigest: "c".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText: `${numericCondition} ${timeCondition} ${timeZoneCondition}`,
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(Object.values(summaryOptions)).toContain(numericCondition);
+    expect(Object.values(summaryOptions)).toContain(timeCondition);
+    expect(Object.values(summaryOptions)).toContain(timeZoneCondition);
+  });
+
+  it("keeps time, date, and multi-initial names intact in the selected headline", async () => {
+    const completeSentence = "A. O. Smith stated the financing must close by 5 p.m. on Sept. 30, 2026, only if the board approves.";
+    const followingSentence = "The issuer will pay Acme five million dollars if all closing conditions are met.";
+    let summaryOptions: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      summaryOptions = choiceCriteria(init?.body, "first_read_summary") ?? {};
+      return Response.json({ model: "jev-latest", answers: validAnswers(init?.body, "candidate_0") });
+    }));
+    const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-time-date-initials",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000009",
+      sourceDigest: "b".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText: `${completeSentence} ${followingSentence}`,
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(Object.values(summaryOptions)).toContain(completeSentence);
+    expect(Object.values(summaryOptions)).toContain(followingSentence);
+    expect(result.firstReadSummary).toEqual({ kind: "selected", candidateId: "candidate_0", sentence: completeSentence });
+  });
+
+  it("drops only the raw truncated tail before candidate filtering", async () => {
+    const completeSentence = "The issuer secured a five-year supply agreement with its largest customer.";
+    const clippedSentence = "The company will repay all debt owed to Acme Inc. ";
+    let summaryOptions: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      summaryOptions = choiceCriteria(init?.body, "first_read_summary") ?? {};
+      return Response.json({ model: "jev-latest", answers: validAnswers(init?.body, "candidate_0") });
+    }));
+    const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-short-tail",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000010",
+      sourceDigest: "b".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText: `${completeSentence} ${clippedSentence}`,
+      sourceTruncated: true,
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(result.firstReadSummary).toEqual({ kind: "selected", candidateId: "candidate_0", sentence: completeSentence });
+    expect(Object.values(summaryOptions)).not.toContain(clippedSentence.trim());
+  });
+
+  it("drops the final nonempty sentence when the internal source cap ends in whitespace", async () => {
+    const completeSentence = "The issuer expanded production capacity to meet signed customer demand.";
+    const clippedSentence = "The company will repay all debt owed to Acme Inc. ";
+    const gap = " ".repeat(20_000 - completeSentence.length - clippedSentence.length);
+    const sourceText = `${completeSentence}${gap}${clippedSentence}only if the asset sale closes.`;
+    expect(sourceText.slice(0, 20_000).endsWith(clippedSentence)).toBe(true);
+    let summaryOptions: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      summaryOptions = choiceCriteria(init?.body, "first_read_summary") ?? {};
+      return Response.json({ model: "jev-latest", answers: validAnswers(init?.body, "candidate_0") });
+    }));
+    const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-internal-trailing-whitespace",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000013",
+      sourceDigest: "d".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText,
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: true,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(result.firstReadSummary).toEqual({ kind: "selected", candidateId: "candidate_0", sentence: completeSentence });
+    expect(Object.values(summaryOptions)).not.toContain(clippedSentence.trim());
+  });
+
+  it("drops a time sentence together with a clipped timezone name or abbreviation", async () => {
+    const completeHeadline = "The issuer secured a five-year supply agreement with its largest customer.";
+    const clippedTimeSentence = "The company will repay the notes by 5 p.m.";
+    const cases = [
+      { ownerId: "investor-upstream-clipped-timezone-name", fragment: "Easte", suffix: "rn Time, but only if the sale closes.", sourceTruncated: true },
+      { ownerId: "investor-upstream-clipped-timezone-abbreviation", fragment: "ES", suffix: "T, but only if the sale closes.", sourceTruncated: true },
+      { ownerId: "investor-internal-clipped-timezone-name", fragment: "Easte", suffix: "rn Time, but only if the sale closes." },
+      { ownerId: "investor-internal-clipped-timezone-abbreviation", fragment: "ES", suffix: "T, but only if the sale closes." },
+    ];
+
+    for (const [index, scenario] of cases.entries()) {
+      const clippedPrefix = `${completeHeadline} ${clippedTimeSentence} ${scenario.fragment}`;
+      const sourceText = scenario.sourceTruncated === true
+        ? clippedPrefix
+        : `${completeHeadline} ${" ".repeat(20_000 - clippedPrefix.length)}${clippedTimeSentence} ${scenario.fragment}${scenario.suffix}`;
+      if (scenario.sourceTruncated !== true) expect(sourceText.slice(0, 20_000).endsWith(scenario.fragment)).toBe(true);
+      let summaryOptions: Record<string, unknown> = {};
+      vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        summaryOptions = choiceCriteria(init?.body, "first_read_summary") ?? {};
+        return Response.json({ model: "jev-latest", answers: validAnswers(init?.body, "candidate_0") });
+      }));
+
+      const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+        ownerId: scenario.ownerId,
+        provider: "sec",
+        nativeId: `SEC:0000000001:0000000001-26-0000${String(30 + index).padStart(2, "0")}`,
+        sourceDigest: "e".repeat(64),
+        subject: issuer(),
+        form: "8-K",
+        sourceTitle: "Current report",
+        sourceText,
+        sourceTruncated: scenario.sourceTruncated,
+        sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+        sourceObservedAt: nowIso(),
+        sourceAvailableAt: nowIso(),
+        sourceAvailablePrecision: "second",
+        evidenceComplete: false,
+        sourceReliability: 95,
+      }, new RequestBudget(3), []);
+
+      expect(Object.values(summaryOptions)).toContain(completeHeadline);
+      expect(Object.values(summaryOptions)).not.toContain(clippedTimeSentence);
+      expect(result.firstReadSummary).toEqual({ kind: "selected", candidateId: "candidate_0", sentence: completeHeadline });
+    }
+  });
+
+  it("splits after sentence-ending corporate and time abbreviations", async () => {
+    const first = "The issuer agreed to acquire Acme Inc.";
+    const second = "The contractual deadline will be 5 p.m.";
+    const third = "Management withdrew its annual guidance.";
+    let summaryOptions: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      summaryOptions = choiceCriteria(init?.body, "first_read_summary") ?? {};
+      return Response.json({ model: "jev-latest", answers: validAnswers(init?.body, "candidate_0") });
+    }));
+    await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-abbreviation-boundaries",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000014",
+      sourceDigest: "e".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText: `${first} ${second} ${third}`,
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(Object.values(summaryOptions)).toEqual(expect.arrayContaining([first, second, third, "No candidate is a substantive, evidence-supported first-read summary."]));
+  });
+
+  it("does not absorb Eastern or Pacific company names after p.m., including a clipped final sentence", async () => {
+    const cases = [
+      {
+        first: "The tender offer expires at 5 p.m.",
+        second: "Eastern Bankshares withdrew its annual guidance after reporting a material decline in regional loan demand.",
+      },
+      {
+        first: "The debt covenant becomes effective at 5 p.m.",
+        second: "Pacific Biosciences revised its full-year revenue outlook following weaker-than-expected instrument sales.",
+      },
+    ];
+
+    for (const [index, scenario] of cases.entries()) {
+      for (const sourceTruncated of [false, true]) {
+        const sourceText = `${scenario.first} ${scenario.second}`;
+        let summaryOptions: Record<string, unknown> = {};
+        vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          summaryOptions = choiceCriteria(init?.body, "first_read_summary") ?? {};
+          return Response.json({ model: "jev-latest", answers: validAnswers(init?.body, "candidate_0") });
+        }));
+
+        const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+          ownerId: `investor-time-company-name-${index}-${sourceTruncated ? "truncated" : "complete"}`,
+          provider: "sec",
+          nativeId: `SEC:0000000001:0000000001-26-0000${String(40 + index * 2 + Number(sourceTruncated)).padStart(2, "0")}`,
+          sourceDigest: "f".repeat(64),
+          subject: issuer(),
+          form: "8-K",
+          sourceTitle: "Current report",
+          sourceText,
+          sourceTruncated,
+          sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+          sourceObservedAt: nowIso(),
+          sourceAvailableAt: nowIso(),
+          sourceAvailablePrecision: "second",
+          evidenceComplete: false,
+          sourceReliability: 95,
+        }, new RequestBudget(3), []);
+
+        expect(Object.values(summaryOptions)).toContain(scenario.first);
+        expect(result.firstReadSummary).toEqual({ kind: "selected", candidateId: "candidate_0", sentence: scenario.first });
+        if (sourceTruncated) expect(Object.values(summaryOptions)).not.toContain(scenario.second);
+        else expect(Object.values(summaryOptions)).toContain(scenario.second);
+      }
+    }
+  });
+
+  it("keeps category screening when the source has no eligible headline sentence", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => Response.json({
+      model: "jev-latest",
+      answers: validAnswers(init?.body),
+    })));
+    const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-no-candidate",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000004",
+      sourceDigest: "d".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText: "U.S.",
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(result.firstReadSummary).toEqual({ kind: "unavailable", reason: "no_candidates" });
+    expect(result.screening.category).toBe("operations");
+    expect(result.screening.typedAnswers.first_read_summary).toBeUndefined();
+    expect(result.screening.decision).toBe("review");
+  });
+
+  it("does not promote an incomplete sentence cut off at the source-text limit", async () => {
+    const partialSentence = "The issuer expects sales to reach $1.";
+    const prefix = "x. ".repeat(Math.floor((20_000 - partialSentence.length) / 3));
+    const sourceText = `${prefix}${" ".repeat(20_000 - prefix.length - partialSentence.length)}${partialSentence}25 million only if planned customer renewals close.`;
+    expect(sourceText.length).toBeGreaterThan(20_000);
+    let submittedText = "";
+    let summaryQuestionSupplied = false;
+    let submittedTruncated = false;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const payload = TypeSafeRequestSchema.parse(JSON.parse(String(init?.body)));
+      submittedText = payload.state.filing.document_text;
+      submittedTruncated = payload.state.filing.document_truncated;
+      summaryQuestionSupplied = choiceCriteria(init?.body, "first_read_summary") !== undefined;
+      return Response.json({ model: "jev-latest", answers: validAnswers(init?.body) });
+    }));
+
+    const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-truncated-summary",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000006",
+      sourceDigest: "f".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText,
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: true,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(submittedText.endsWith(partialSentence)).toBe(true);
+    expect(summaryQuestionSupplied).toBe(false);
+    expect(submittedTruncated).toBe(true);
+    expect(result.firstReadSummary).toEqual({ kind: "unavailable", reason: "no_candidates" });
+    expect(result.screening.decision).toBe("review");
+  });
+
+  it("never offers SEC cover-page checkbox legends as first-read summary candidates", async () => {
+    const narrative = "As previously disclosed, the Nasdaq Hearings Panel notified the Company that its securities face delisting.";
+    const sourceText = "FORM 8-K CURRENT REPORT. Emerging growth company \u2612 If an emerging growth company, indicate by check mark if the registrant has elected not to use the extended transition period for complying with any new or revised financial accounting standards provided pursuant to Section 13(a) of the Exchange Act. \u2610 Item 3.01. Notice of Delisting or Failure to Satisfy a Continued Listing Rule or Standard; Transfer of Listing. " + narrative;
+    let offeredSummaries: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      offeredSummaries = Object.values(choiceCriteria(init?.body, "first_read_summary") ?? {});
+      return Response.json({ model: "jev-latest", answers: validAnswers(init?.body) });
+    }));
+
+    const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-cover-noise",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000007",
+      sourceDigest: "a".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText,
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: true,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(offeredSummaries.some((value) => String(value).includes("Emerging growth company"))).toBe(false);
+    expect(result.firstReadSummary).toEqual({ kind: "selected", candidateId: "candidate_0", sentence: narrative });
+  });
+
+  it("abstains from a first-read summary when the captured text is only cover-page legend", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => (
+      Response.json({ model: "jev-latest", answers: validAnswers(init?.body) })
+    )));
+    const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-only-cover",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000008",
+      sourceDigest: "b".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText: "Emerging growth company \u2612 If an emerging growth company, indicate by check mark if the registrant has elected not to use the extended transition period for complying with any new or revised financial accounting standards provided pursuant to Section 13(a) of the Exchange Act. \u2612 Written communications pursuant to Rule 425 under the Securities Act (17 CFR 230.425).",
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: true,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(result.firstReadSummary).toEqual({ kind: "unavailable", reason: "no_candidates" });
+  });
+
+  it("keeps Messrs. honorifics inside a single first-read summary candidate", async () => {
+    const narrative = "The agreement was amended by InstaMortgage, Shashank Shekhar and Ankur Dhingra (Messrs. Shekhar and Dhingra together, the \u201cStockholders\u201d), and restated in its entirety.";
+    let offeredSummaries: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      offeredSummaries = Object.values(choiceCriteria(init?.body, "first_read_summary") ?? {});
+      return Response.json({ model: "jev-latest", answers: validAnswers(init?.body) });
+    }));
+
+    const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-messrs",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000009",
+      sourceDigest: "c".repeat(64),
+      subject: issuer(),
+      form: "8-K/A",
+      sourceTitle: "Amendment",
+      sourceText: narrative,
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: true,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(offeredSummaries[0] ? String(offeredSummaries[0]).includes("Messrs. Shekhar") : false).toBe(true);
+    expect(offeredSummaries.some((value) => String(value).startsWith("Shekhar and Dhingra"))).toBe(false);
+    expect(result.screening.decision).toBe("review");
+  });
+
+  it("uses exhaustive TypeSafe group selection when a filing has more headline candidates than one bounded choice", async () => {
+    const candidateSentences = Array.from({ length: 300 }, (_, index) => `The issuer listed operating update ${index} during this quarter.`);
+    const keyDisclosure = "The issuer disclosed that its largest customer cancelled the supply agreement and production stopped at its only operating facility.";
+    candidateSentences[6] = keyDisclosure;
+    const sourceText = candidateSentences.join(" ");
+    expect(sourceText.length).toBeLessThan(20_000);
+    const submittedGroupCriteria: Record<string, unknown> = {};
+    let groupCriteria: Record<string, unknown> = {};
+    let resolutionCriteria: Record<string, unknown> = {};
+    let resolutionState: { filing: { document_text: string; candidate_group: Array<{ source_sentence: string }> } } | undefined;
+    let typeSafeRequests = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const payload = TypeSafeRequestSchema.parse(JSON.parse(String(init?.body)));
+      typeSafeRequests += 1;
+      groupCriteria = choiceCriteria(init?.body, "first_read_summary_group") ?? {};
+      resolutionCriteria = choiceCriteria(init?.body, "first_read_summary") ?? {};
+      Object.assign(submittedGroupCriteria, groupCriteria);
+      if (payload.state.filing.candidate_group !== undefined) {
+        resolutionState = {
+          filing: {
+            document_text: payload.state.filing.document_text,
+            candidate_group: payload.state.filing.candidate_group,
+          },
+        };
+      }
+      return Response.json({
+        model: typeSafeRequests === 1 ? "jev-stage-one-test" : "jev-stage-two-test",
+        answers: validAnswers(init?.body, typeSafeRequests === 1 ? undefined : "candidate_6"),
+      });
+    }));
+    const result = await screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-coverage",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000005",
+      sourceDigest: "e".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText,
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), []);
+
+    expect(typeSafeRequests).toBe(2);
+    expect(Object.keys(submittedGroupCriteria)).toContain("group_0");
+    const suppliedSentences = Object.values(submittedGroupCriteria)
+      .filter((group): group is { candidates: Array<{ id: string; source_sentence: string }> } => typeof group === "object" && group !== null && "candidates" in group)
+      .flatMap((group) => group.candidates.map((candidate) => candidate.source_sentence));
+    expect(suppliedSentences).toHaveLength(300);
+    expect(suppliedSentences).toContain(keyDisclosure);
+    expect(resolutionCriteria.candidate_6).toBe(keyDisclosure);
+    expect(resolutionState?.filing.document_text).toBe(sourceText);
+    expect(resolutionState?.filing.candidate_group.map((candidate) => candidate.source_sentence)).toContain(keyDisclosure);
+    expect(result.firstReadSummary).toEqual({ kind: "selected", candidateId: "candidate_6", sentence: keyDisclosure });
+    expect(result.model).toBe("jev-stage-one-test; summary resolution: jev-stage-two-test");
+    expect(result.screening.typedAnswers.first_read_summary_group).toMatchObject({ type: "choice", choice: "group_0" });
+    expect(result.screening.typedAnswers.first_read_summary).toMatchObject({ type: "choice", choice: "candidate_6" });
+  });
+
+  it("rejects a summary-resolution response that omits its model identity", async () => {
+    const sourceText = Array.from({ length: 255 }, (_, index) => `The issuer filed operating update ${index} during this quarter.`).join(" ");
+    let typeSafeRequests = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      typeSafeRequests += 1;
+      const answers = validAnswers(init?.body);
+      return Response.json(typeSafeRequests === 1 ? { model: "jev-stage-one-test", answers } : { answers });
+    }));
+
+    await expect(screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-resolution-missing-model",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000015",
+      sourceDigest: "f".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText,
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), [])).rejects.toMatchObject({
+      provider: "typesafe_ai",
+      stage: "validation",
+      message: "TypeSafe AI returned a malformed summary-resolution response.",
+    });
+    expect(typeSafeRequests).toBe(2);
+  });
+
+  it("withholds a long-document screening when the exact-sentence TypeSafe pass fails", async () => {
+    const sourceText = Array.from({ length: 300 }, (_, index) => `The issuer filed operating update ${index} during this quarter.`).join(" ");
+    let typeSafeRequests = 0;
+    const captures: CaptureRecord[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      typeSafeRequests += 1;
+      if (choiceCriteria(init?.body, "first_read_summary_group") !== undefined) {
+        return Response.json({ model: "jev-latest", answers: validAnswers(init?.body) });
+      }
+      return new Response("temporarily unavailable", { status: 503 });
+    }));
+
+    await expect(screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-second-pass-failure",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000007",
+      sourceDigest: "a".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText,
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(4), captures)).rejects.toMatchObject({ provider: "typesafe_ai", status: 503 });
+
+    expect(typeSafeRequests).toBe(3);
+    expect(captures).toHaveLength(3);
+  });
+
+  it("withholds a TypeSafe summary choice that does not map to a captured source sentence", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const answers = validAnswers(init?.body);
+      return Response.json({
+        model: "jev-latest",
+        answers: {
+          ...answers,
+          first_read_summary: { ...answers.first_read_summary, choice: "invented_sentence" },
+        },
+      });
+    }));
+    await expect(screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-invalid-summary-choice",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000002",
+      sourceDigest: "b".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText: "The company expanded production capacity during the quarter. Management raised its full-year outlook after new customer commitments increased.",
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), [])).rejects.toMatchObject({
+      provider: "typesafe_ai",
+      stage: "validation",
+      message: "TypeSafe AI first-read summary probabilities or selected choice do not match the supported options.",
+    });
+  });
+
+  it("rejects a direct TypeSafe choice that contradicts its probability distribution", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const answers = validAnswers(init?.body);
+      return Response.json({
+        model: "jev-latest",
+        answers: {
+          ...answers,
+          first_read_summary: {
+            type: "choice",
+            choice: "candidate_0",
+            probabilities: { candidate_0: 0, none: 1 },
+            confidence: 1,
+          },
+        },
+      });
+    }));
+    await expect(screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-summary-contradictory-probabilities",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000011",
+      sourceDigest: "c".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText: "The issuer raised its annual production capacity after opening a second facility.",
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), [])).rejects.toMatchObject({
+      provider: "typesafe_ai",
+      stage: "validation",
+      message: "TypeSafe AI selected a first-read summary option that is not tied for the highest probability.",
+    });
+  });
+
+  it("rejects a TypeSafe group choice that contradicts its probability distribution", async () => {
+    let requests = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requests += 1;
+      const answers = validAnswers(init?.body);
+      const groupIds = Object.keys(choiceCriteria(init?.body, "first_read_summary_group") ?? {});
+      return Response.json({
+        model: "jev-latest",
+        answers: {
+          ...answers,
+          first_read_summary_group: {
+            type: "choice",
+            choice: "group_0",
+            probabilities: Object.fromEntries(groupIds.map((id) => [id, id === "none" ? 1 : 0])),
+            confidence: 1,
+          },
+        },
+      });
+    }));
+    await expect(screenSource(workerEnv({ ...testEnv, TYPESAFE_API_KEY: "test-token-not-a-real-key" }), {
+      ownerId: "investor-group-contradictory-probabilities",
+      provider: "sec",
+      nativeId: "SEC:0000000001:0000000001-26-000012",
+      sourceDigest: "d".repeat(64),
+      subject: issuer(),
+      form: "8-K",
+      sourceTitle: "Current report",
+      sourceText: Array.from({ length: 300 }, (_, index) => `The issuer filed operating update ${index} during this quarter.`).join(" "),
+      sourceUrl: "https://www.sec.gov/Archives/edgar/data/1/filing.htm",
+      sourceObservedAt: nowIso(),
+      sourceAvailableAt: nowIso(),
+      sourceAvailablePrecision: "second",
+      evidenceComplete: false,
+      sourceReliability: 95,
+    }, new RequestBudget(3), [])).rejects.toMatchObject({
+      provider: "typesafe_ai",
+      stage: "validation",
+      message: "TypeSafe AI selected a first-read summary group option that is not tied for the highest probability.",
+    });
+    expect(requests).toBe(1);
+  });
+
   it("runs Federal Register capture through TypeSafe, normalization, and durable D1 state", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.hostname === "www.federalregister.gov" && url.pathname === "/api/v1/documents.json") {
         expect(url.searchParams.getAll("fields[]")).toEqual([
@@ -352,7 +1140,7 @@ describe("private investor Worker", () => {
         });
       }
       if (url.hostname === "api.typesafe.ai") {
-        return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers() }), {
+        return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers(init?.body) }), {
           headers: { "content-type": "application/json" },
         });
       }
@@ -379,7 +1167,7 @@ describe("private investor Worker", () => {
   });
 
   it("keeps successfully captured Federal Register records but marks an incomplete paginated slice degraded", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.hostname === "www.federalregister.gov" && url.pathname === "/api/v1/documents.json") {
         if (url.searchParams.get("page") === "2") return new Response("temporarily unavailable", { status: 503 });
@@ -400,7 +1188,7 @@ describe("private investor Worker", () => {
         });
       }
       if (url.hostname === "api.typesafe.ai") {
-        return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers() }), {
+        return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers(init?.body) }), {
           headers: { "content-type": "application/json" },
         });
       }
@@ -432,7 +1220,8 @@ describe("private investor Worker", () => {
   });
 
   it("reads an SEC filing from the official directory through the primary document and TypeSafe", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const selectedSummary = "The filing identifies new customer commitments and higher quarterly capital spending, but says the expansion depends on receiving every required regulatory approval before the end of the next fiscal year and does not guarantee the expected production schedule.";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.href === "https://www.sec.gov/files/company_tickers_exchange.json") {
         return new Response(JSON.stringify({
@@ -451,12 +1240,12 @@ describe("private investor Worker", () => {
         } } }), { headers: { "content-type": "application/json" } });
       }
       if (url.hostname === "www.sec.gov" && url.pathname.includes("/Archives/edgar/data/")) {
-        return new Response("<html><body><p>Example Industries expanded production capacity by 22 percent after completing its second manufacturing line. The filing identifies new customer commitments and higher quarterly capital spending.</p></body></html>", {
+        return new Response(`<html><body><p>Example Industries expanded production capacity by 22 percent after completing its second manufacturing line. ${selectedSummary}</p></body></html>`, {
           headers: { "content-type": "text/html; charset=utf-8" },
         });
       }
       if (url.hostname === "api.typesafe.ai") {
-        return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers() }), {
+        return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers(init?.body, "candidate_1") }), {
           headers: { "content-type": "application/json" },
         });
       }
@@ -472,7 +1261,9 @@ describe("private investor Worker", () => {
     const snapshot = await response.json() as { events: Event[]; sourceHealth: Array<{ provider: string; status: string }> };
     expect(snapshot.events).toHaveLength(1);
     expect(snapshot.events[0]?.subject).toMatchObject({ kind: "issuer", ticker: { value: "EXMP" } });
-    expect(snapshot.events[0]?.title).toContain("Example Industries expanded production capacity");
+    expect(selectedSummary.length).toBeGreaterThan(180);
+    expect(snapshot.events[0]?.title).toBe(selectedSummary);
+    expect(snapshot.events[0]?.title).not.toBe("Current report");
     expect(snapshot.events[0]?.screening.evidenceComplete).toBe(false);
     expect(snapshot.events[0]?.screening.decision).toBe("review");
     expect(snapshot.events[0]?.evidence[0]?.label).toContain("exhibits not captured");
@@ -504,6 +1295,56 @@ describe("private investor Worker", () => {
     const offset = await testEnv.DB.prepare("SELECT value FROM meta WHERE owner_id = ? AND key = 'secPublicOffset'")
       .bind("investor-sec-live").first<{ value: string }>();
     expect(offset?.value).toBe("0");
+  });
+
+  it("keeps a clipped SEC decimal sentence out of TypeSafe summary choices while retaining an earlier complete headline", async () => {
+    const completeHeadline = "The issuer secured a five-year supply agreement with its largest customer to support planned expansion.";
+    const clippedFragment = "The issuer expects sales to reach $1.";
+    const fillerLength = 20_000 - completeHeadline.length - 1 - clippedFragment.length;
+    const sourceAtLimit = `${completeHeadline} ${"x".repeat(fillerLength - 2)}. ${clippedFragment}`;
+    expect(sourceAtLimit).toHaveLength(20_000);
+    const fullSource = `${sourceAtLimit}25 million only if all planned customer renewals close.`;
+    let submittedDocumentTruncated = false;
+    let summaryCriteria: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.href === "https://www.sec.gov/files/company_tickers_exchange.json") {
+        return Response.json({ fields: ["cik", "name", "ticker", "exchange"], data: [[1234, "Example Industries", "EXMP", "NASDAQ"]] });
+      }
+      if (url.href === "https://data.sec.gov/submissions/CIK0000001234.json") {
+        return Response.json({ filings: { recent: {
+          form: ["8-K"],
+          accessionNumber: ["0000001234-26-000009"],
+          primaryDocument: ["boundary.htm"],
+          primaryDocDescription: ["Current report"],
+          filingDate: ["2026-09-23"],
+          acceptanceDateTime: [nowIso()],
+        } } });
+      }
+      if (url.hostname === "www.sec.gov" && url.pathname.includes("/Archives/edgar/data/")) return new Response(fullSource);
+      if (url.hostname === "api.typesafe.ai") {
+        const payload = TypeSafeRequestSchema.parse(JSON.parse(String(init?.body)));
+        submittedDocumentTruncated = payload.state.filing.document_truncated;
+        summaryCriteria = choiceCriteria(init?.body, "first_read_summary") ?? {};
+        return Response.json({ model: "jev-latest", answers: validAnswers(init?.body, "candidate_0") });
+      }
+      return new Response("unexpected provider request", { status: 500 });
+    }));
+
+    const response = await worker.fetch(jsonRequest("/api/refresh", "investor-sec-truncated-source", { source: "all_public" }), {
+      ...testEnv,
+      TYPESAFE_API_KEY: "test-token-not-a-real-key",
+      NEWSJACK_SEC_USER_AGENT: "Newsjack test contact: test@example.invalid",
+    });
+    expect(response.status).toBe(200);
+    const snapshot = await response.json() as { events: Event[] };
+    expect(submittedDocumentTruncated).toBe(true);
+    expect(Object.values(summaryCriteria)).toContain(completeHeadline);
+    expect(Object.values(summaryCriteria)).not.toContain(clippedFragment);
+    expect(snapshot.events).toHaveLength(1);
+    expect(snapshot.events[0]?.title).toBe(completeHeadline);
+    expect(snapshot.events[0]?.title).not.toContain("$1.");
+    expect(snapshot.events[0]?.screening.rationale.join(" ")).toContain("provided source text was known to be truncated");
   });
 
   it("searches and rotates across the full SEC exchange directory without a 1,000-issuer cap", async () => {
@@ -548,7 +1389,7 @@ describe("private investor Worker", () => {
       { accession: "0000001234-26-000001", date: "2026-09-21", acceptance: "20260921160000", document: "earlier.htm" },
     ];
     let typeSafeCalls = 0;
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.href === "https://www.sec.gov/files/company_tickers_exchange.json") {
         return new Response(JSON.stringify({ fields: ["cik", "name", "ticker", "exchange"], data: [[1234, "Example Industries", "EXMP", "NASDAQ"]] }));
@@ -569,7 +1410,7 @@ describe("private investor Worker", () => {
       }
       if (url.hostname === "api.typesafe.ai") {
         typeSafeCalls += 1;
-        return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers() }));
+        return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers(init?.body) }));
       }
       return new Response("unexpected provider request", { status: 500 });
     }));
@@ -598,7 +1439,7 @@ describe("private investor Worker", () => {
     let submissionCalls = 0;
     let documentCalls = 0;
     let typeSafeCalls = 0;
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.href === "https://www.sec.gov/files/company_tickers_exchange.json") {
         return new Response(JSON.stringify({ fields: ["cik", "name", "ticker", "exchange"], data: [[1234, "Example Industries", "EXMP", "NASDAQ"]] }));
@@ -618,7 +1459,7 @@ describe("private investor Worker", () => {
       }
       if (url.hostname === "api.typesafe.ai") {
         typeSafeCalls += 1;
-        return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers() }));
+        return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers(init?.body) }));
       }
       return new Response("unexpected provider request", { status: 500 });
     }));
@@ -754,14 +1595,14 @@ describe("private investor Worker", () => {
     const ownerId = "investor-watchlist-no-exchange";
     await worker.fetch(jsonRequest("/api/watchlist", ownerId, { action: "add", issuer: issuer() }), testEnv);
     const filingDate = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.hostname === "data.sec.gov") return Response.json({ filings: { recent: {
         form: ["8-K"], accessionNumber: ["0000000001-26-000001"], primaryDocument: ["current.htm"],
         primaryDocDescription: ["Current report"], filingDate: [filingDate], acceptanceDateTime: [""],
       } } });
       if (url.hostname === "www.sec.gov") return new Response("The company increased contracted manufacturing capacity by 18 percent following completion of its new production line.");
-      if (url.hostname === "api.typesafe.ai") return Response.json({ model: "jev-latest", answers: validAnswers() });
+      if (url.hostname === "api.typesafe.ai") return Response.json({ model: "jev-latest", answers: validAnswers(init?.body) });
       return new Response("unexpected request", { status: 500 });
     }));
     const refreshed = await worker.fetch(jsonRequest("/api/refresh", ownerId, { source: "watchlist" }), {
@@ -852,7 +1693,7 @@ describe("private investor Worker", () => {
 
   it("revalidates a previously screened SEC source and refreshes the saved observation time", async () => {
     let typeSafeCalls = 0;
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.href === "https://www.sec.gov/files/company_tickers_exchange.json") {
         return new Response(JSON.stringify({ fields: ["cik", "name", "ticker", "exchange"], data: [[1234, "Example Industries", "EXMP", "NASDAQ"]] }));
@@ -868,7 +1709,7 @@ describe("private investor Worker", () => {
       }
       if (url.hostname === "api.typesafe.ai") {
         typeSafeCalls += 1;
-        return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers() }));
+        return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers(init?.body) }));
       }
       return new Response("unexpected provider request", { status: 500 });
     }));
@@ -962,7 +1803,7 @@ describe("private investor Worker", () => {
 
   it("retries an abstract-only Federal Register screen and upgrades it when full text recovers", async () => {
     let documentAttempts = 0;
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.hostname === "www.federalregister.gov" && url.pathname === "/api/v1/documents.json") {
         return new Response(JSON.stringify({ count: 1, total_pages: 1, next_page_url: null, results: [{
@@ -981,7 +1822,7 @@ describe("private investor Worker", () => {
         if (documentAttempts === 1) return new Response("temporarily unavailable", { status: 503 });
         return new Response("The Department of Energy revised eligibility for the regional grid resilience program. The final notice explains that utility projects must provide updated reliability metrics and submit funding requests before the new application deadline.");
       }
-      if (url.hostname === "api.typesafe.ai") return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers() }));
+      if (url.hostname === "api.typesafe.ai") return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers(init?.body) }));
       return new Response("unexpected provider request", { status: 500 });
     }));
 
@@ -1011,7 +1852,7 @@ describe("private investor Worker", () => {
   });
 
   it("degrades Federal Register health when delivered record counts do not reconcile", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.hostname === "www.federalregister.gov" && url.pathname === "/api/v1/documents.json") {
         return new Response(JSON.stringify({ count: 10, total_pages: 1, next_page_url: null, results: [{
@@ -1028,7 +1869,7 @@ describe("private investor Worker", () => {
       if (url.hostname === "www.federalregister.gov" && url.pathname.includes("full_text")) {
         return new Response("The Department of Energy outlines a new energy program for regional utilities. The notice explains eligibility, timing, and a revised allocation of federal support that may affect regulated power companies.");
       }
-      if (url.hostname === "api.typesafe.ai") return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers() }));
+      if (url.hostname === "api.typesafe.ai") return new Response(JSON.stringify({ model: "jev-latest", answers: validAnswers(init?.body) }));
       return new Response("unexpected provider request", { status: 500 });
     }));
 
@@ -1239,7 +2080,13 @@ function refreshWrite(event: Event, refreshedAt: string) {
   };
 }
 
-function validAnswers() {
+function validAnswers(body: RequestInit["body"], preferredSummaryId?: string) {
+  TypeSafeRequestSchema.parse(JSON.parse(String(body)));
+  const summaryOptions = Object.keys(choiceCriteria(body, "first_read_summary") ?? {});
+  const groupOptions = Object.keys(choiceCriteria(body, "first_read_summary_group") ?? {});
+  const summaryChoice = preferredSummaryId !== undefined && summaryOptions.includes(preferredSummaryId)
+    ? preferredSummaryId
+    : summaryOptions.find((option) => option !== "none");
   const score = {
     type: "score",
     score: 3,
@@ -1258,5 +2105,23 @@ function validAnswers() {
       probabilities: { operations: 0.8, capital_allocation: 0.05, governance_legal: 0.05, risk_disclosure: 0.05, routine_disclosure: 0.05 },
       confidence: 0.8,
     },
+    ...(summaryChoice === undefined ? {} : { first_read_summary: {
+      type: "choice",
+      choice: summaryChoice,
+      probabilities: Object.fromEntries(summaryOptions.map((option) => [option, option === summaryChoice ? 1 : 0])),
+      confidence: 1,
+    } }),
+    ...(groupOptions.length === 0 ? {} : { first_read_summary_group: {
+      type: "choice",
+      choice: groupOptions.find((option) => option !== "none") ?? "none",
+      probabilities: Object.fromEntries(groupOptions.map((option) => [option, option === (groupOptions.find((value) => value !== "none") ?? "none") ? 1 : 0])),
+      confidence: 1,
+    } }),
   };
+}
+
+function choiceCriteria(body: RequestInit["body"], questionId: string): Record<string, unknown> | undefined {
+  const payload = TypeSafeRequestSchema.parse(JSON.parse(String(body)));
+  const question = z.object({ criteria: z.record(z.string(), z.unknown()) }).safeParse(payload.questions[questionId]);
+  return question.success ? question.data.criteria : undefined;
 }

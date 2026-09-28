@@ -60,7 +60,9 @@ export async function fetchCaptured(
   try {
     await env.CAPTURES.put(objectKey, bytes, {
       contentType,
-      customMetadata: { provider, nativeHash, sha256, observedAt, adapterVersion: ADAPTER_VERSION },
+      // A content-addressed object describes immutable bytes. Retrieval time is
+      // observation lineage on the CaptureRecord, not mutable blob metadata.
+      customMetadata: { provider, nativeHash, sha256, adapterVersion: ADAPTER_VERSION },
     });
   } catch {
     throw new ProviderFailure(provider, "capture", `${providerLabel(provider)} responded, but its private evidence capture could not be retained. This batch was not advanced.`, response.status);

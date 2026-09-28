@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import {
   EventSchema,
+  MarketContextSchema,
   CompanyCoverageSchema,
   AgencySchema,
   IssuerSchema,
@@ -75,7 +76,7 @@ const AuditItemSchema = z.object({
     thesis_link: z.number().int().min(0).max(100),
     source_reliability: z.number().int().min(0).max(100),
     attention_score: z.number().int().min(0).max(100),
-    lane: z.enum(["read_now", "monitor", "human_review", "incomplete"]),
+    lane: z.enum(["read_now", "monitor", "human_review", "incomplete", "passed"]),
     rationale: z.array(z.string().min(1)).min(1),
   }).passthrough(),
 }).passthrough().refine((item) => (item.issuer !== undefined) !== (item.company !== undefined), "Each audit item must identify either an SEC issuer or a public company.");
@@ -152,7 +153,28 @@ function cliRoot(): string {
   return path.basename(root) === "cli" ? root : path.join(root, "apps", "cli");
 }
 
-function dataRoot(): string {
+
+// Run archives hold raw captures and evidence per scan; retention keeps the
+// newest ones for audit without letting a 3-minute poll schedule fill the disk.
+export async function pruneRunDirectories(root: string, keep = 24): Promise<void> {
+  const runsDir = path.join(root, "runs");
+  let entries: string[];
+  try {
+    entries = await fs.readdir(runsDir);
+  } catch {
+    return;
+  }
+  const named = entries.filter((name) => /^\d{4}-\d{2}-\d{2}T/.test(name)).sort().reverse();
+  for (const name of named.slice(keep)) {
+    try {
+      await fs.rm(path.join(runsDir, name), { recursive: true, force: true });
+    } catch {
+      // A busy directory simply survives to the next pass.
+    }
+  }
+}
+
+export function dataRoot(): string {
   return process.env.SIGNAL_DESK_DATA_DIR ?? path.resolve("data");
 }
 
@@ -238,6 +260,8 @@ function decisionForLane(lane: InvestorAuditItem["screening"]["lane"]): "review"
       return "review";
     case "monitor":
       return "watch";
+    case "passed":
+      return "ignore";
     default: {
       const exhaustive: never = lane;
       return exhaustive;
@@ -283,11 +307,15 @@ export function eventFromItem(item: InvestorAuditItem): Event {
     evidence: [{
       label: provider === "sec" ? `SEC ${item.form} filing` : provider === "finnhub_news" ? "Finnhub company news" : `Federal Register ${item.form}`,
       url: item.source.url,
-      capture: item.evidence.complete ? "content" : "reference",
+            // The desk holds the captured excerpt whenever one exists; bounded text is
+      // still content — completeness is tracked on the screening, matching the
+      // private Worker runtime.
+      capture: item.evidence.excerpt.trim().length > 0 ? "content" : "reference",
       sourceNativeId: item.source.native_id,
       excerpt: excerpt || "Primary filing text was not captured.",
     }],
     screening: {
+      level: item.screening_level,
       engine: "typesafe_ai",
       modelConfidence: ScoreSchema.parse(screening.model_confidence),
       typedAnswers: answerRecord(screening.typed_answers),
@@ -303,6 +331,20 @@ export function eventFromItem(item: InvestorAuditItem): Event {
       rationale: screening.rationale,
     },
     review: { status: "unreviewed", note: "", updatedAt: null },
+    ...(item.market_context === undefined ? {} : (() => {
+      const raw = item.market_context as Record<string, unknown>;
+      const parsed = MarketContextSchema.safeParse({
+        ticker: raw.ticker,
+        baselineDate: raw.baseline_date,
+        baselineClose: raw.baseline_close,
+        latestDate: raw.latest_date,
+        latestClose: raw.latest_close,
+        changePercent: raw.change_percent,
+        source: raw.source,
+        observedAt: raw.observed_at,
+      });
+      return parsed.success ? { marketContext: parsed.data } : {};
+    })()),
   });
 }
 
@@ -350,6 +392,9 @@ export function healthFromAudit(audit: InvestorAudit, companyCoverage: CompanyCo
   const secFailures = audit.failures.filter((failure) => failure.stage.startsWith("sec_")).length;
   const typesafeFailures = audit.failures.filter((failure) => failure.stage.startsWith("typesafe_")).length;
   const filings = "sec_filings" in audit.source ? countField(audit.source, "sec_filings") : countField(audit.source, "filings_considered");
+  const secStreamConsidered = countField(audit.source, "sec_stream_considered");
+  const secStreamSurfaced = countField(audit.source, "sec_stream_surfaced");
+  const secStreamPassed = countField(audit.source, "sec_stream_passed");
   const calls = countField(audit.engine, "calls");
   const federalFilings = countField(audit.source, "federal_register_filings");
   const federalFailures = audit.failures.filter((failure) => failure.stage.startsWith("federal_register_")).length;
@@ -366,7 +411,11 @@ export function healthFromAudit(audit: InvestorAudit, companyCoverage: CompanyCo
     ? (companyNewsFailures === 0 ? `Finnhub returned ${companyNews} company-news records.` : `Finnhub returned ${companyNews} company-news records with ${companyNewsFailures} disclosed failures.`)
     : `Live company news checked ${companyCoverage.symbolsScanned} of ${companyCoverage.eligibleSymbols.toLocaleString()} supported US common-stock listings this pass; ${companyCoverage.articlesLinkedToUniverse} stories passed attribution across ${companyCoverage.symbolsLinked} tickers, ${companyNews} records retained, and ${companyCoverage.recordsExcludedAsUnrelated} withheld during ticker-attribution review${companyCoverage.hasDeferredRecords ? "; the per-run TypeSafe item cap was reached; remaining returned items are retained only as raw evidence and were not screened" : "; scanning rotates through the remaining directory"}${tickerRequestFailures > 0 ? `; ${tickerRequestFailures} failed ticker request(s) are retained for retry on the next rotation` : ""}.`;
   return {
-    sec: secRequested ? { kind: "checked", health: health("sec", secStatus, filings > 0 ? "live" : "unavailable", secFailures === 0 ? `SEC captured ${filings} eligible filings.` : `SEC captured ${filings} filings with ${secFailures} disclosed failures.`) } : { kind: "not_queried" },
+    sec: secRequested ? { kind: "checked", health: health("sec", secStatus, filings > 0 ? "live" : "unavailable", secFailures === 0
+        ? (secStreamConsidered > 0
+          ? `SEC stream: ${secStreamConsidered.toLocaleString()} filings ingested · ${secStreamSurfaced.toLocaleString()} surfaced for review · ${secStreamPassed.toLocaleString()} passed as routine.`
+          : `SEC captured ${filings} eligible filings.`)
+        : `SEC captured ${filings} filings with ${secFailures} disclosed failures.`) } : { kind: "not_queried" },
     federal: federalRequested ? { kind: "checked", health: health("federal_register", federalStatus, federalFilings > 0 ? "live" : "unavailable", federalFailures === 0 ? `Federal Register captured ${federalFilings} documents.` : `Federal Register captured ${federalFilings} documents with ${federalFailures} disclosed failures.`) } : { kind: "not_queried" },
     companyNews: companyNewsRequested ? { kind: "checked", health: health("finnhub_news", companyNewsStatus, finnhubProcessingDisabled ? "unavailable" : companyCoverage !== null ? "live" : companyNews > 0 ? "live" : "unavailable", companyNewsMessage) } : { kind: "not_queried" },
     typesafe: calls > 0 ? { kind: "checked", health: health("typesafe_ai", typesafeStatus, "live", typesafeFailures === 0 ? `TypeSafe AI screened ${calls} records.` : `TypeSafe AI screened ${calls} records with ${typesafeFailures} disclosed failures.`) } : { kind: "not_queried" },
@@ -387,6 +436,7 @@ export async function runInvestorScan(entries: readonly WatchlistEntry[], source
   const scanArgs = ["investor", "scan", "--source", source, "--since", since, "--run-dir", runDirectory, "--max-issuers", maxIssuers, "--max-filings-per-issuer", maxFilings, "--max-company-news-items", maxCompanyNewsItems, "--max-company-news-symbols", maxCompanyNewsSymbols];
   if (source === "company_news" || source === "all") scanArgs.push("--finnhub-symbol-offset", String(finnhubSymbolOffset));
   if (source === "watchlist") scanArgs.push("--watchlist", watchlistPath);
+  scanArgs.push("--sec-cache-dir", path.join(dataRoot(), "sec-cache"));
   if (source === "all_public") scanArgs.push("--auto");
   const userAgent = process.env.NEWSJACK_SEC_USER_AGENT ?? process.env.SEC_USER_AGENT ?? "";
   if (userAgent.length > 0) scanArgs.push("--user-agent", userAgent);

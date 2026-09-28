@@ -87,3 +87,6 @@ __pycache__/
 .tmp/
 tmp/
 .claude/scheduled_tasks.lock
+
+# Local runtime state: SQLite store and the pinned Go module cache used by the investor scan.
+apps/investor-desk-newsjack/data/

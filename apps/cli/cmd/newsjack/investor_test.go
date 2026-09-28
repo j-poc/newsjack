@@ -298,6 +298,146 @@ func TestInvestorSummaryHeadlineUsesCapturedMeaningfulText(t *testing.T) {
 	}
 }
 
+func TestInvestorSummaryHeadlineSkipsCoverPageNoise(t *testing.T) {
+	filing := investorFiling{
+		Issuer: investorIssuer{Ticker: "ADGM", Name: "Adtheus Digital Medicine Group, Inc."},
+		Form:   "8-K", PrimaryDescription: "Current report",
+		Text: "26051 Merit Circle , Suite 102 Laguna Hills, CA 92653 (Address of principal executive offices; Zip Code) (949) 348-1188",
+	}
+	if got := investorSummaryHeadline(filing); got != "Current report" {
+		t.Fatalf("cover-page-only headline = %q, want the primary description", got)
+	}
+}
+
+func TestInvestorSummaryHeadlinePrefersNarrativeOverCoverPage(t *testing.T) {
+	filing := investorFiling{
+		Issuer: investorIssuer{Ticker: "ADGM", Name: "Adtheus Digital Medicine Group, Inc."},
+		Form:   "8-K", PrimaryDescription: "Current report",
+		Text: "26051 Merit Circle , Suite 102 Laguna Hills, CA 92653 (Address of principal executive offices; Zip Code) (949) 348-1188. The company entered into a definitive agreement to acquire its primary contract manufacturer.",
+	}
+	want := "The company entered into a definitive agreement to acquire its primary contract manufacturer."
+	if got := investorSummaryHeadline(filing); got != want {
+		t.Fatalf("narrative headline = %q, want %q", got, want)
+	}
+}
+
+func TestInvestorSummaryHeadlineSkipsCheckboxLegends(t *testing.T) {
+	filing := investorFiling{
+		Issuer: investorIssuer{Ticker: "ADTX", Name: "Aditxt, Inc."},
+		Form:   "8-K", PrimaryDescription: "Current report",
+		Text: "FORM 8-K CURRENT REPORT. Emerging growth company \u2612 If an emerging growth company, indicate by check mark if the registrant has elected not to use the extended transition period for complying with any new or revised financial accounting standards provided pursuant to Section 13(a) of the Exchange Act. \u2610 Item 3.01. As previously disclosed, the Nasdaq Hearings Panel notified the Company that its securities face delisting.",
+	}
+	want := "The Nasdaq Hearings Panel notified the Company that its securities face delisting."
+	if got := investorSummaryHeadline(filing); got != want {
+		t.Fatalf("checkbox legend headline = %q, want the narrative fact %q", got, want)
+	}
+}
+
+func TestInvestorSummaryHeadlinePrefersNarrativeOverSectionHeading(t *testing.T) {
+	filing := investorFiling{
+		Issuer: investorIssuer{Ticker: "ALC", Name: "Alcoa Corporation"},
+		Form:   "8-K", PrimaryDescription: "Current report",
+		Text: "Item 1.01 Entry into a Material Definitive Agreement. On September 22, 2026, Alcoa Corporation entered into a definitive agreement to sell its stake in the joint venture for $310 million.",
+	}
+	want := "Entered into a definitive agreement to sell its stake in the joint venture for $310 million."
+	if got := investorSummaryHeadline(filing); got != want {
+		t.Fatalf("section heading headline = %q, want the narrative fact %q", got, want)
+	}
+}
+
+func TestInvestorSummaryHeadlineKeepsMessrsSentenceTogether(t *testing.T) {
+	filing := investorFiling{
+		Issuer: investorIssuer{Ticker: "AIRE", Name: "reAlpha Tech Corp."},
+		Form:   "8-K/A", PrimaryDescription: "Amendment",
+		Text: "The merger agreement among reAlpha, InstaMortgage, and the Stockholders (Messrs. Shekhar and Dhingra) was amended and restated.",
+	}
+	want := "The merger agreement among reAlpha, InstaMortgage, and the Stockholders (Messrs. Shekhar and Dhingra) was amended and restated."
+	if got := investorSummaryHeadline(filing); got != want {
+		t.Fatalf("messrs split headline = %q, want the whole sentence %q", got, want)
+	}
+}
+
+func TestInvestorCleanExcerptSkipsXBRLContext(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"context block", "false 0001726711 0001726711 2026-09-17 2026-09-17 iso4217:USD xbrli:shares UNITED STATES SECURITIES AND EXCHANGE COMMISSION", "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"},
+		{"cover stamp", "ADAGIO MEDICAL HOLDINGS, INC._September 23, 2026 0002006986 false 0002006986 2026-09-23 FORM 8-K CURRENT REPORT", "FORM 8-K CURRENT REPORT"},
+		{"form number lead", "8-K 0001671584 false 0001671584 2026-09-22 2026-09-22 UNITED STATES SECURITIES", "UNITED STATES SECURITIES"},
+		{"cik stamp lead", "Alcoa Corp 0001675149 2026-09-23 2026-09-23 UNITED STATES SECURITIES AND EXCHANGE COMMISSION", "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"},
+		{"filename stamp lead", "apog-20260918 0000006845 false 0000006845 2024-11-04 2024-11-04 UNITED STATES SECURITIES AND EXCHANGE COMMISSION", "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"},
+		{"zero-width lead", "\u200b\u200bUNITED STATES SECURITIES AND EXCHANGE COMMISSION", "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"},
+		{"mid-text mention stays", "A rule of the United States Securities and Exchange Commission applies here.", "A rule of the United States Securities and Exchange Commission applies here."},
+		{"plain prose", "On September 23, 2026, the Company adopted a plan.", "On September 23, 2026, the Company adopted a plan."},
+	}
+	for _, tc := range cases {
+		if got := investorCleanExcerpt(tc.in, 1200); got != tc.want {
+			t.Errorf("%s: excerpt = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestInvestorFinishSummaryHeadlineCutsLongSentencesAtWordBoundary(t *testing.T) {
+	long := strings.Repeat("word ", 50)
+	got := investorFinishSummaryHeadline(long)
+	cut := strings.LastIndex(long[:140], " ")
+	want := long[:cut] + "\u2026"
+	if got != want {
+		t.Fatalf("long headline = %q, want the word-bounded cut %q", got, want)
+	}
+}
+
+func TestInvestorSummaryHeadlineStripsEdgarCheckboxGlyphBeforeHeading(t *testing.T) {
+	filing := investorFiling{
+		Issuer: investorIssuer{Ticker: "ALC", Name: "Alcoa Corporation"},
+		Form:   "8-K", PrimaryDescription: "Current report",
+		Text: "\uf06f Item 1.01 Entry into a Material Definitive Agreement. On September 23, 2026, Alcoa completed an offering of $1,500,000,000 aggregate principal amount of 6.625% senior notes due 2034.",
+	}
+	want := "Alcoa completed an offering of $1,500,000,000 aggregate principal amount of 6.625% senior notes due 2034."
+	if got := investorSummaryHeadline(filing); got != want {
+		t.Fatalf("glyph-prefixed heading = %q, want the narrative fact %q", got, want)
+	}
+}
+
+func TestInvestorSummaryHeadlineSkipsItemHeadingBodyAfterItemNumber(t *testing.T) {
+	filing := investorFiling{
+		Issuer: investorIssuer{Ticker: "ADTX", Name: "Aditxt, Inc."},
+		Form:   "8-K", PrimaryDescription: "Current report",
+		Text: "\u2610 Item 3.01. Notice of Delisting or Failure to Satisfy a Continued Listing Rule or Standard; Transfer of Listing. As previously disclosed, the Nasdaq Hearings Panel notified the Company that its securities face delisting.",
+	}
+	want := "The Nasdaq Hearings Panel notified the Company that its securities face delisting."
+	if got := investorSummaryHeadline(filing); got != want {
+		t.Fatalf("item heading body = %q, want the narrative fact %q", got, want)
+	}
+}
+
+func TestInvestorSummaryHeadlineFallsBackToDocumentTitleWhenOnlyCoverNoise(t *testing.T) {
+	filing := investorFiling{
+		Issuer: investorIssuer{Ticker: "ALC", Name: "Alcoa Corporation"},
+		Form:   "8-K", PrimaryDescription: "Current report",
+		Text: "Emerging growth company \u2612 If an emerging growth company, indicate by check mark if the registrant has elected not to use the extended transition period for complying with any new or revised financial accounting standards provided pursuant to Section 13(a) of the Exchange Act. \u2612 Written communications pursuant to Rule 425 under the Securities Act (17 CFR 230.425) \u2610 Soliciting Material pursuant to Rule 14a-12.",
+	}
+	if got := investorSummaryHeadline(filing); got != "Current report" {
+		t.Fatalf("cover-only headline = %q, want the document title", got)
+	}
+}
+
+func TestInvestorRelevanceGateFiltersRoutineRecords(t *testing.T) {
+	meaningful := investorScore{Materiality: 2.4, Novelty: 2.0, MarketSensitivity: 2.0, ThesisLink: 1.5, Confidence: 0.8}
+	if !investorRecordIsRelevant("operations", meaningful) {
+		t.Fatal("a meaningful non-routine record should reach the wire")
+	}
+	if investorRecordIsRelevant("routine_disclosure", meaningful) {
+		t.Fatal("a record still categorized as routine disclosure should stay off the wire")
+	}
+	routine := investorScore{Materiality: 1.2, ThesisLink: 2.5, Confidence: 0.8}
+	if investorRecordIsRelevant("operations", routine) {
+		t.Fatal("a below-materiality record without a thesis connection should stay off the wire")
+	}
+	focused := investorScore{Materiality: 1.5, ThesisLink: 3.2, Confidence: 0.8}
+	if !investorRecordIsRelevant("governance_legal", focused) {
+		t.Fatal("a clear thesis connection should keep a record on the wire")
+	}
+}
+
 func TestInvestorSummaryHeadlineKeepsDecimalAmountsIntact(t *testing.T) {
 	filing := investorFiling{
 		Company:     &investorCompany{Symbol: "DASH", Name: "DoorDash"},
@@ -329,9 +469,9 @@ func TestInvestorSummaryHeadlineStripsWireDatelineAndCompanyAbbreviation(t *test
 		Company:            &investorCompany{Symbol: "BBNX", Name: "BETA BIONICS INC"},
 		SourceProvider:     "finnhub_news",
 		PrimaryDescription: "Beta Bionics Announces Agreement Integrate the iLet Bionic Pancreas and mint with Senseonics",
-		SummaryText:        "IRVINE, Calif., Sept. 22, 2026 (GLOBE NEWSWIRE) -- Beta Bionics, Inc. (Nasdaq: BBNX), a leader in diabetes management, today announced a partnership to integrate its systems with Senseonics' continuous glucose monitor. Commercial launch is expected in the fourth quarter of 2026.",
+		SummaryText:        "IRVINE, Calif., Sept. 22, 2026 (GLOBE NEWSWIRE) -- Beta Bionics, Inc. (Nasdaq: BBNX), a leader in diabetes management, today announced a partnership with Senseonics.",
 	}
-	want := "Beta Bionics, Inc. (Nasdaq: BBNX), a leader in diabetes management, today announced a partnership to integrate its systems with Senseonics' continuous glucose monitor."
+	want := "Beta Bionics, Inc. (Nasdaq: BBNX), a leader in diabetes management, today announced a partnership with Senseonics."
 	if got := investorSummaryHeadline(filing); got != want {
 		t.Fatalf("wire-release summary headline = %q, want %q", got, want)
 	}

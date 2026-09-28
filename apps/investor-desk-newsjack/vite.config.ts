@@ -11,5 +11,6 @@ export default defineConfig({
   server: {
     port: Number(process.env.VITE_PORT ?? 5180),
     proxy: { "/api": `http://localhost:${Number(process.env.VITE_API_PORT ?? 8789)}` },
+    watch: { ignored: ["**/data/**", "**/dist/**"] },
   },
 });

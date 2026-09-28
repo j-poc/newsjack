@@ -23,6 +23,18 @@ otherwise development mode uses `go run` from the repository root. Set
 runs. The default local all-public scan is bounded at 500 issuers and can be
 changed deliberately with `NEWSJACK_MAX_ISSUERS`.
 
+SEC requests are paced (default 300 ms spacing, tunable with
+`--sec-request-spacing-ms`) inside the SEC's 10-requests-per-second fair-access
+cap. Filing documents are immutable and cached across runs under
+`data/sec-cache/`; submissions and daily-index responses carry a 5-minute TTL
+(`NEWSJACK_SEC_CACHE_TTL_SUBMISSIONS_SECONDS`) and the issuer directory 24 hours
+(`NEWSJACK_SEC_CACHE_TTL_DIRECTORY_SECONDS`). When SEC answers 429 — or a
+rate-limit 403 — the pipeline stops asking immediately and records a 10-minute
+cooldown matching the SEC's published resume window, persisted across runs in
+`data/sec-cache/rate-limit-state.json`; the wire then reports the cooldown
+honestly instead of hammering through the block. A 403 that names an undeclared
+automated tool is reported as a configuration error, not a rate limit.
+
 ## Sources and safeguards
 
 - SEC EDGAR is the company filings and issuer-directory source. The browser

@@ -127,6 +127,7 @@ export const EvidenceRefSchema = z.object({
 export type EvidenceRef = z.infer<typeof EvidenceRefSchema>;
 
 export const ScreeningSchema = z.object({
+  level: z.enum(["coarse", "deep"]).optional(),
   engine: z.string().min(1),
   modelConfidence: ScoreSchema,
   typedAnswers: z.record(z.string(), TypedAnswerSchema).refine((answers) => Object.keys(answers).length > 0, "At least one typed answer is required."),
@@ -150,6 +151,18 @@ export const ReviewSchema = z.object({
 }).strict();
 export type Review = z.infer<typeof ReviewSchema>;
 
+export const MarketContextSchema = z.object({
+  ticker: z.string().min(1),
+  baselineDate: InstantSchema,
+  baselineClose: z.number().finite().positive(),
+  latestDate: InstantSchema,
+  latestClose: z.number().finite().positive(),
+  changePercent: z.number().finite(),
+  source: z.literal("yahoo_finance"),
+  observedAt: InstantSchema,
+}).strict();
+export type MarketContext = z.infer<typeof MarketContextSchema>;
+
 export const EventSchema = z.object({
   id: z.string().min(1),
   subject: SubjectSchema,
@@ -165,6 +178,7 @@ export const EventSchema = z.object({
   evidence: z.array(EvidenceRefSchema).min(1),
   screening: ScreeningSchema,
   review: ReviewSchema,
+  marketContext: MarketContextSchema.optional(),
 }).strict();
 export type Event = z.infer<typeof EventSchema>;
 
@@ -218,9 +232,35 @@ export const CompanyCoverageSchema = z.object({
 }).strict();
 export type CompanyCoverage = z.infer<typeof CompanyCoverageSchema>;
 
-export const AppSnapshotSchema = z.object({
-  schemaVersion: z.literal(1),
+export const EventScopeSchema = z.enum(["watchlist", "all_public", "federal", "all"]);
+export type EventScope = z.infer<typeof EventScopeSchema>;
+export const EVENTS_PAGE_SIZE = 20;
+
+export const EventCursorSchema = z.object({
+  version: z.literal(1),
+  revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  scope: EventScopeSchema,
+  attentionScore: ScoreSchema,
+  availableAt: InstantSchema,
+  id: z.string().min(1).max(400),
+}).strict();
+export type EventCursor = z.infer<typeof EventCursorSchema>;
+
+export const EventPageSchema = z.object({
   events: z.array(EventSchema),
+  eventsTotal: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  eventsRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  eventsCursor: z.string().min(1).max(2048).nullable(),
+}).strict();
+export type EventPage = z.infer<typeof EventPageSchema>;
+
+export const AppSnapshotSchema = z.object({
+  schemaVersion: z.literal(2),
+  events: z.array(EventSchema),
+  eventsTotal: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  eventsRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  eventsCursor: z.string().min(1).max(2048).nullable(),
+  eventsScope: EventScopeSchema,
   watchlist: z.array(WatchlistEntrySchema),
   companyCoverage: CompanyCoverageSchema.nullable(),
   publicIssuerCoverage: PublicIssuerCoverageSchema.nullable().default(null),
@@ -232,6 +272,7 @@ export type AppSnapshot = z.infer<typeof AppSnapshotSchema>;
 export const ReviewUpdateSchema = z.object({
   status: ReviewStatusSchema,
   note: z.string().max(2000).default(""),
+  expectedReview: ReviewSchema,
 }).strict();
 export type ReviewUpdate = z.infer<typeof ReviewUpdateSchema>;
 
@@ -248,6 +289,12 @@ export type WatchlistAction = z.infer<typeof WatchlistActionSchema>;
 
 export function nowIso(): Instant {
   return new Date().toISOString();
+}
+
+export function nextReviewUpdatedAt(now: Instant, previous: Review): Instant {
+  const candidate = Date.parse(InstantSchema.parse(now));
+  const previousAt = previous.updatedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(previous.updatedAt);
+  return new Date(Math.max(candidate, previousAt + 1)).toISOString();
 }
 
 export function scoreAttention(input: Pick<Screening, "materiality" | "novelty" | "marketSensitivity" | "thesisMatch" | "sourceReliability">): Score {
@@ -286,6 +333,21 @@ export function sortEvents(events: readonly Event[]): Event[] {
   return [...events].sort((left, right) => {
     const scoreDelta = right.screening.attentionScore - left.screening.attentionScore;
     if (scoreDelta !== 0) return scoreDelta;
-    return right.availableAt.localeCompare(left.availableAt);
+    const timeDelta = Date.parse(right.availableAt) - Date.parse(left.availableAt);
+    if (timeDelta !== 0) return timeDelta;
+    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
   });
+}
+
+export function encodeEventCursor(cursor: EventCursor): string {
+  return encodeURIComponent(JSON.stringify(EventCursorSchema.parse(cursor)));
+}
+
+export function decodeEventCursor(value: string): EventCursor | null {
+  if (value.length > 2048) return null;
+  try {
+    return EventCursorSchema.parse(JSON.parse(decodeURIComponent(value)));
+  } catch {
+    return null;
+  }
 }

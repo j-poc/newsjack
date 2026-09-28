@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +41,9 @@ type investorSECScanOptions struct {
 	Concurrency           int
 	Timeout               time.Duration
 	FinnhubSymbolOffset   int
+	CacheDir              string
+	StreamMaxRecords      int
+	StreamMaxDeep         int
 }
 
 type investorSubmission struct {
@@ -283,10 +287,24 @@ func parseSECInvestorTime(raw, fallbackPrecision string) (investorTime, error) {
 
 func normalizeInvestorDocument(raw []byte, maxChars int) (string, bool, string) {
 	value := string(raw)
+	// Full submission files begin with an <SEC-HEADER> block of machine
+	// metadata (accession numbers, .hdr.sgml filenames, acceptance stamps);
+	// everything before the first document is envelope, not content.
+	if header := strings.Index(value, "<SEC-HEADER"); header >= 0 {
+		if end := strings.Index(value[header:], "</SEC-HEADER>"); end >= 0 {
+			value = value[header+end+len("</SEC-HEADER>"):]
+		} else if document := strings.Index(value, "<DOCUMENT>"); document >= 0 {
+			value = value[document:]
+		}
+	}
 	value = investorHTMLCommentPattern.ReplaceAllString(value, " ")
 	value = investorScriptPattern.ReplaceAllString(value, " ")
 	value = investorTagPattern.ReplaceAllString(value, " ")
 	value = html.UnescapeString(value)
+	// Entities decode here: EDGAR encodes zero-width spaces and the private-use
+	// checkbox glyphs (&#8203;, &#61514;) numerically, so the glyph strip must
+	// run after unescaping or the characters re-enter the text.
+	value = investorStripInvisibleGlyphs(value)
 	value = strings.Join(strings.Fields(value), " ")
 	if value == "" {
 		return "", false, "empty_document"
@@ -297,7 +315,231 @@ func normalizeInvestorDocument(raw []byte, maxChars int) (string, bool, string) 
 	return value, true, "primary_document_captured"
 }
 
+// investorRateLimitCooldown matches the SEC's published fair-access policy: a
+// blocked client may resume once its request rate has stayed under the cap for
+// roughly ten minutes, so retrying earlier only extends the block.
+const investorRateLimitCooldown = 10 * time.Minute
+
+const investorRateLimitStateFile = "rate-limit-state.json"
+
+// investorSECFetchGate serializes every SEC fetch: a global request pace well
+// inside the 10-requests-per-second fair-access cap, a persistent cross-run
+// capture cache (filing documents are immutable; list endpoints have short
+// TTLs), and a persisted cooldown that stops all SEC traffic after a 429 or a
+// rate-limit 403 instead of hammering through the block.
+type investorSECFetchGate struct {
+	mu            sync.Mutex
+	pacing        time.Duration
+	lastRequest   time.Time
+	cooldownUntil time.Time
+	cacheDir      string
+}
+
+var investorSECFetch = &investorSECFetchGate{pacing: 300 * time.Millisecond}
+
+// investorConfigureSECFetch wires the gate to the run's cache directory and
+// request spacing. The cooldown state file makes the backoff survive the
+// short-lived scan process, so the next refresh honors it too.
+func investorConfigureSECFetch(cacheDir string, pacing time.Duration) {
+	investorSECFetch.mu.Lock()
+	defer investorSECFetch.mu.Unlock()
+	investorSECFetch.cacheDir = cacheDir
+	if pacing > 0 {
+		investorSECFetch.pacing = pacing
+	}
+	investorSECFetch.cooldownUntil = investorReadRateLimitState(cacheDir, time.Now())
+}
+
+func (g *investorSECFetchGate) cacheLookup(rawURL string, now time.Time) ([]byte, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.cacheDir == "" {
+		return nil, false
+	}
+	meta, ok := investorReadCacheMeta(g.cacheDir, rawURL)
+	if !ok {
+		return nil, false
+	}
+	if meta.TTLSeconds > 0 && now.Sub(meta.fetchedTime) > time.Duration(meta.TTLSeconds)*time.Second {
+		return nil, false
+	}
+	body, err := os.ReadFile(filepath.Join(g.cacheDir, investorCacheKey(rawURL)+".body"))
+	if err != nil {
+		return nil, false
+	}
+	return body, true
+}
+
+func (g *investorSECFetchGate) cacheStore(rawURL string, body []byte, ttl time.Duration, now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.cacheDir == "" || ttl < 0 {
+		return
+	}
+	if err := os.MkdirAll(g.cacheDir, 0o755); err != nil {
+		return
+	}
+	key := investorCacheKey(rawURL)
+	meta, _ := json.Marshal(investorCacheMeta{
+		URL:        rawURL,
+		FetchedAt:  now.Format(time.RFC3339Nano),
+		TTLSeconds: int64(ttlSeconds(ttl)),
+	})
+	investorAtomicWrite(filepath.Join(g.cacheDir, key+".meta"), meta)
+	investorAtomicWrite(filepath.Join(g.cacheDir, key+".body"), body)
+}
+
+func ttlSeconds(ttl time.Duration) int64 {
+	if ttl <= 0 {
+		return 0
+	}
+	return int64(ttl / time.Second)
+}
+
+func investorAtomicWrite(path string, body []byte) {
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, body, 0o644) != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
+}
+
+type investorCacheMeta struct {
+	URL        string `json:"url"`
+	FetchedAt  string `json:"fetched_at"`
+	TTLSeconds int64  `json:"ttl_seconds"`
+
+	fetchedTime time.Time
+}
+
+func investorReadCacheMeta(cacheDir, rawURL string) (investorCacheMeta, bool) {
+	raw, err := os.ReadFile(filepath.Join(cacheDir, investorCacheKey(rawURL)+".meta"))
+	if err != nil {
+		return investorCacheMeta{}, false
+	}
+	var meta investorCacheMeta
+	if json.Unmarshal(raw, &meta) != nil || meta.URL != rawURL {
+		return investorCacheMeta{}, false
+	}
+	fetchedAt, err := time.Parse(time.RFC3339Nano, meta.FetchedAt)
+	if err != nil {
+		return investorCacheMeta{}, false
+	}
+	meta.fetchedTime = fetchedAt
+	return meta, true
+}
+
+func investorCacheKey(rawURL string) string {
+	return sha256Hex([]byte(rawURL))
+}
+
+func (g *investorSECFetchGate) pace(now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pacing > 0 {
+		if earliest := g.lastRequest.Add(g.pacing); now.Before(earliest) {
+			time.Sleep(earliest.Sub(now))
+			now = earliest
+		}
+	}
+	g.lastRequest = now
+}
+
+func (g *investorSECFetchGate) rateLimitActive(now time.Time) (time.Time, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.cooldownUntil, now.Before(g.cooldownUntil)
+}
+
+func (g *investorSECFetchGate) tripRateLimit(now time.Time) time.Time {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	candidate := now.Add(investorRateLimitCooldown)
+	if candidate.After(g.cooldownUntil) {
+		g.cooldownUntil = candidate
+		investorWriteRateLimitState(g.cacheDir, candidate)
+	}
+	return g.cooldownUntil
+}
+
+func investorReadRateLimitState(cacheDir string, now time.Time) time.Time {
+	if cacheDir == "" {
+		return time.Time{}
+	}
+	raw, err := os.ReadFile(filepath.Join(cacheDir, investorRateLimitStateFile))
+	if err != nil {
+		return time.Time{}
+	}
+	var state struct {
+		CooldownUntil string `json:"cooldown_until"`
+	}
+	if json.Unmarshal(raw, &state) != nil {
+		return time.Time{}
+	}
+	until, err := time.Parse(time.RFC3339, state.CooldownUntil)
+	if err != nil || !until.After(now) {
+		return time.Time{}
+	}
+	return until
+}
+
+func investorWriteRateLimitState(cacheDir string, until time.Time) {
+	if cacheDir == "" {
+		return
+	}
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return
+	}
+	body, err := json.Marshal(map[string]string{"cooldown_until": until.Format(time.RFC3339)})
+	if err != nil {
+		return
+	}
+	investorAtomicWrite(filepath.Join(cacheDir, investorRateLimitStateFile), body)
+}
+
+// investorCacheTTLFor assigns a lifetime by URL class. Filing documents are
+// immutable and cached forever; list endpoints change intraday and carry short
+// TTLs; unknown classes are never cached.
+func investorCacheTTLFor(rawURL string) time.Duration {
+	if strings.Contains(rawURL, "/daily-index/") {
+		return investorSecondsEnv("NEWSJACK_SEC_CACHE_TTL_SUBMISSIONS_SECONDS", 5*time.Minute)
+	}
+	if strings.Contains(rawURL, "company_tickers") {
+		return investorSecondsEnv("NEWSJACK_SEC_CACHE_TTL_DIRECTORY_SECONDS", 24*time.Hour)
+	}
+	if strings.Contains(rawURL, "/submissions/") {
+		return investorSecondsEnv("NEWSJACK_SEC_CACHE_TTL_SUBMISSIONS_SECONDS", 5*time.Minute)
+	}
+	if strings.Contains(rawURL, "/Archives/") {
+		return 0
+	}
+	return -1
+}
+
+func investorSecondsEnv(name string, fallback time.Duration) time.Duration {
+	raw := getenv(name, "")
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return time.Duration(parsed) * time.Second
+}
+
+// investorHTTPGet fetches an SEC resource politely: the persistent cache is
+// checked first, the global pace is applied before every network request, and
+// a 429 (or a rate-limit 403) trips the persisted cooldown so the rest of the
+// run — and the next run — stop asking instead of extending the block.
 func investorHTTPGet(rawURL, userAgent string, timeout time.Duration) ([]byte, error) {
+	if body, ok := investorSECFetch.cacheLookup(rawURL, time.Now()); ok {
+		return body, nil
+	}
+	if until, active := investorSECFetch.rateLimitActive(time.Now()); active {
+		return nil, fmt.Errorf("SEC rate-limit cooldown active until %s; no request sent", until.Format(time.RFC3339))
+	}
+	investorSECFetch.pace(time.Now())
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -314,9 +556,14 @@ func investorHTTPGet(rawURL, userAgent string, timeout time.Duration) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode == 429 || (resp.StatusCode == 403 && bytes.Contains(body, []byte("Request Rate Threshold Exceeded"))) {
+		until := investorSECFetch.tripRateLimit(time.Now())
+		return body, fmt.Errorf("HTTP %d (SEC rate limit; backing off until %s)", resp.StatusCode, until.Format(time.RFC3339))
+	}
 	if resp.StatusCode >= 400 {
 		return body, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
+	investorSECFetch.cacheStore(rawURL, body, investorCacheTTLFor(rawURL), time.Now())
 	return body, nil
 }
 

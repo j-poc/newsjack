@@ -33,6 +33,8 @@ const (
 
 var investorCIKPattern = regexp.MustCompile(`^[0-9]{10}$`)
 
+var investorFTSBaseURL = getenv("NEWSJACK_SEC_FTS_BASE_URL", "https://efts.sec.gov")
+
 type investorWatchlist struct {
 	SchemaVersion int                    `json:"schema_version"`
 	Issuers       []investorIssuer       `json:"issuers"`
@@ -161,6 +163,28 @@ func investorCategoryFromAnswers(answers map[string]any) (string, error) {
 		return "", fmt.Errorf("TypeSafe category %q is not one of the allowed categories", choice)
 	}
 	return choice, nil
+}
+
+const (
+	// investorRelevanceMaterialityFloor is the lowest TypeSafe materiality
+	// score that counts as a meaningful update on the 0-4 rubric.
+	investorRelevanceMaterialityFloor = 2.0
+	// investorRelevanceThesisFloor is the TypeSafe thesis_link score that
+	// means a clear connection to the stated research focus.
+	investorRelevanceThesisFloor = 3.0
+)
+
+// investorRecordIsRelevant applies the deterministic surfacing bar on top of
+// TypeSafe's typed judgments: a record reaches the investor wire only when its
+// category is more specific than routine disclosure and materiality reaches the
+// meaningful floor, or when thesis_link shows a clear connection to the stated
+// research focus. Everything below the bar stays in the audit trail and never
+// becomes a wire event.
+func investorRecordIsRelevant(category string, score investorScore) bool {
+	if category != "routine_disclosure" && score.Materiality >= investorRelevanceMaterialityFloor {
+		return true
+	}
+	return score.ThesisLink >= investorRelevanceThesisFloor
 }
 
 type investorAudit struct {

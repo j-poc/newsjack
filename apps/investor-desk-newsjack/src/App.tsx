@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactElement } from "react";
-import { ApiRequestError, getSnapshot, refresh, reviewEvent, searchIssuers, updateWatchlist } from "./api";
+import { ApiRequestError, getEventPage, getSnapshot, refresh, reviewEvent, searchIssuers, updateWatchlist } from "./api";
 import { WatchlistEntries } from "./WatchlistEntries";
 import { eventsForScope, type SourceScope } from "./event-scope";
 import {
@@ -13,6 +13,7 @@ import {
   type SourceHealth,
   type Subject,
   isReviewable,
+  sortEvents,
 } from "./domain";
 
 type QueueView = "wire" | "read_now" | "monitor" | "reviewed";
@@ -52,9 +53,9 @@ function relativeTime(value: string): string {
 }
 
 function laneLabel(event: Event): string {
-  if (event.screening.decision === "review") return event.screening.evidenceComplete ? "read now" : "human review";
+  if (event.screening.decision === "review") return "review";
   if (event.screening.decision === "watch") return "monitor";
-  return "low priority";
+  return "passed";
 }
 
 function categoryLabel(value: Event["screening"]["category"]): string {
@@ -74,60 +75,94 @@ function filterEvents(events: readonly Event[], view: QueueView): Event[] {
   return [...events];
 }
 
-function groupedByCategory(events: readonly Event[]): Map<Event["screening"]["category"], Event[]> {
-  const groups = new Map<Event["screening"]["category"], Event[]>();
-  for (const event of events) {
-    const current = groups.get(event.screening.category) ?? [];
-    current.push(event);
-    groups.set(event.screening.category, current);
-  }
-  return groups;
+
+function mergeSnapshot(current: AppSnapshot | null, incoming: AppSnapshot): AppSnapshot {
+  if (current === null || current.eventsScope !== incoming.eventsScope) return incoming;
+  if (incoming.eventsRevision < current.eventsRevision) return current;
+  if (current.eventsRevision !== incoming.eventsRevision) return incoming;
+  const byId = new Map(current.events.map((event) => [event.id, event]));
+  for (const event of incoming.events) byId.set(event.id, mergeEventReview(byId.get(event.id), event));
+  return { ...incoming, events: sortEvents([...byId.values()]), eventsCursor: current.eventsCursor };
+}
+
+function mergeEventReview(current: Event | undefined, incoming: Event): Event {
+  if (current === undefined) return incoming;
+  const currentAt = current.review.updatedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(current.review.updatedAt);
+  const incomingAt = incoming.review.updatedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(incoming.review.updatedAt);
+  const keepCurrent = currentAt > incomingAt
+    || (currentAt === incomingAt && (current.review.status !== incoming.review.status || current.review.note !== incoming.review.note));
+  return keepCurrent ? { ...incoming, review: current.review } : incoming;
+}
+
+function mergeReviewedEvent(snapshot: AppSnapshot, event: Event): AppSnapshot {
+  const byId = new Map(snapshot.events.map((item) => [item.id, item]));
+  const current = byId.get(event.id);
+  byId.set(event.id, current === undefined ? event : { ...current, review: mergeEventReview(current, event).review });
+  return { ...snapshot, events: sortEvents([...byId.values()]) };
 }
 
 function App(): ReactElement {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<QueueView>("wire");
+  const [categoryFilter, setCategoryFilter] = useState<"all" | Event["screening"]["category"]>("all");
   const [scope, setScope] = useState<ScanSource>(initialScanScope);
   const [busy, setBusy] = useState<"loading" | "refresh" | "review" | "watchlist" | "add" | null>("loading");
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState("");
+  const [conflictingReview, setConflictingReview] = useState<Event["review"] | null>(null);
+  const noteDrafts = useRef(new Map<string, string>());
+  const dirtyNoteDrafts = useRef(new Set<string>());
+  const scopeRequestGeneration = useRef(0);
   const [issuerQuery, setIssuerQuery] = useState("");
   const [issuerMatches, setIssuerMatches] = useState<IssuerSearchResult[]>([]);
   const [issuerChoice, setIssuerChoice] = useState<IssuerSearchResult | null>(null);
   const [showAllWire, setShowAllWire] = useState(false);
+  const [paginationStale, setPaginationStale] = useState(false);
+  const [pageBusy, setPageBusy] = useState(false);
 
-  async function runRefresh(nextScope = scope): Promise<void> {
+  async function runRefresh(nextScope = scope, generation = scopeRequestGeneration.current): Promise<void> {
+    if (generation !== scopeRequestGeneration.current) return;
     setBusy("refresh");
     setError(null);
     try {
       const next = await refresh(nextScope);
-      setSnapshot(next);
-      setSelectedId(next.events[0]?.id ?? null);
+      if (generation !== scopeRequestGeneration.current) return;
+      setSnapshot((current) => mergeSnapshot(current, next));
+      setPaginationStale(false);
+      setSelectedId((current) => current ?? next.events[0]?.id ?? null);
     } catch (reason: unknown) {
-      if (reason instanceof ApiRequestError && reason.snapshot !== null) setSnapshot(reason.snapshot);
+      if (generation !== scopeRequestGeneration.current) return;
+      if (reason instanceof ApiRequestError) {
+        const failedSnapshot = reason.snapshot;
+        if (failedSnapshot !== null) setSnapshot((current) => mergeSnapshot(current, failedSnapshot));
+      }
       setError(reason instanceof Error ? reason.message : "The wire could not be refreshed.");
     } finally {
-      setBusy(null);
+      if (generation === scopeRequestGeneration.current) setBusy(null);
     }
   }
 
   useEffect(() => {
     let active = true;
-    getSnapshot()
+    const generation = ++scopeRequestGeneration.current;
+    getSnapshot(scope)
       .then((initial) => {
-        if (!active) return;
+        if (!active || generation !== scopeRequestGeneration.current) return;
         setSnapshot(initial);
         setBusy(null);
-        void runRefresh(scope);
+        void runRefresh(scope, generation);
       })
       .catch((reason: unknown) => {
-        if (active) {
+        if (active && generation === scopeRequestGeneration.current) {
           setError(reason instanceof Error ? reason.message : "Could not open the investor desk.");
           setBusy(null);
         }
       });
-    return () => { active = false; };
+    return () => {
+      active = false;
+      if (scopeRequestGeneration.current === generation) scopeRequestGeneration.current += 1;
+    };
   }, []);
 
   useEffect(() => {
@@ -136,13 +171,13 @@ function App(): ReactElement {
 
   useEffect(() => {
     if (snapshot === null) return;
-    const timer = window.setInterval(() => void runRefresh(scope), 10 * 60 * 1000);
+    const timer = window.setInterval(() => void runRefresh(scope), 3 * 60 * 1000);
     return () => window.clearInterval(timer);
   }, [scope, snapshot]);
 
   const watchedCiks = useMemo(() => new Set(snapshot?.watchlist.map((entry) => entry.issuer.cik.value) ?? []), [snapshot]);
   const scopedEvents = useMemo(() => eventsForScope(snapshot?.events ?? [], scope, watchedCiks), [snapshot, scope, watchedCiks]);
-  const filteredEvents = useMemo(() => filterEvents(scopedEvents, view), [scopedEvents, view]);
+  const filteredEvents = useMemo(() => filterEvents(scopedEvents, view).filter((event) => categoryFilter === "all" || event.screening.category === categoryFilter), [scopedEvents, view, categoryFilter]);
   const selectedEvent = useMemo(() => filteredEvents.find((event) => event.id === selectedId) ?? filteredEvents[0] ?? null, [filteredEvents, selectedId]);
   const secHealth = snapshot?.sourceHealth.find((health) => health.provider === "sec");
   const federalHealth = snapshot?.sourceHealth.find((health) => health.provider === "federal_register");
@@ -156,7 +191,6 @@ function App(): ReactElement {
   const activeSourcesHealthy = activeSourceHealth.every(({ health }) => health?.status === "healthy" && health.freshness === "live");
   const typesafeHealthy = typesafeHealth?.status === "healthy" && typesafeHealth.freshness === "live";
   const reviewCount = scopedEvents.filter(isReviewable).length;
-  const categories = useMemo(() => groupedByCategory(filteredEvents), [filteredEvents]);
   const status = busy === "refresh"
     ? "reading the wire"
     : snapshot === null || snapshot.lastRefreshAt === null
@@ -185,34 +219,121 @@ function App(): ReactElement {
   useEffect(() => {
     if (selectedEvent !== null) {
       setSelectedId(selectedEvent.id);
-      setNote(selectedEvent.review.note);
     }
-  }, [selectedEvent]);
+  }, [selectedEvent?.id]);
+
+  useEffect(() => {
+    setConflictingReview(null);
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (selectedId === null) return;
+    const selected = snapshot?.events.find((event) => event.id === selectedId);
+    if (selected !== undefined) {
+      if (dirtyNoteDrafts.current.has(selectedId)) setNote(noteDrafts.current.get(selectedId) ?? selected.review.note);
+      else {
+        noteDrafts.current.delete(selectedId);
+        setNote(selected.review.note);
+      }
+    }
+  }, [selectedId, snapshot?.events.find((event) => event.id === selectedId)?.review.note, snapshot?.events.find((event) => event.id === selectedId)?.review.updatedAt]);
+
+  function editNote(value: string): void {
+    setNote(value);
+    if (selectedId !== null) {
+      noteDrafts.current.set(selectedId, value);
+      if (value === selectedEvent?.review.note) dirtyNoteDrafts.current.delete(selectedId);
+      else dirtyNoteDrafts.current.add(selectedId);
+    }
+  }
+
+  async function loadOlderRecords(): Promise<void> {
+    if (snapshot?.eventsCursor === null || snapshot === null || pageBusy || paginationStale) return;
+    const requestedScope = snapshot.eventsScope;
+    const generation = scopeRequestGeneration.current;
+    setPageBusy(true);
+    try {
+      const page = await getEventPage(snapshot.eventsCursor);
+      setSnapshot((current) => {
+        if (generation !== scopeRequestGeneration.current || current === null || current.eventsScope !== requestedScope || current.eventsRevision !== page.eventsRevision) return current;
+        const byId = new Map(current.events.map((event) => [event.id, event]));
+        for (const event of page.events) byId.set(event.id, event);
+        return { ...current, events: sortEvents([...byId.values()]), eventsCursor: page.eventsCursor };
+      });
+    } catch (reason: unknown) {
+      if (generation === scopeRequestGeneration.current) {
+        if (reason instanceof ApiRequestError && reason.status === 409) setPaginationStale(true);
+        setError(reason instanceof Error ? reason.message : "Older records could not be loaded.");
+      }
+    } finally {
+      if (generation === scopeRequestGeneration.current) setPageBusy(false);
+    }
+  }
+
+  async function reloadRecordList(): Promise<void> {
+    const generation = scopeRequestGeneration.current;
+    setPageBusy(true);
+    try {
+      const next = await getSnapshot(scope);
+      if (generation !== scopeRequestGeneration.current) return;
+      setSnapshot((current) => mergeSnapshot(current, next));
+      setPaginationStale(false);
+      setError(null);
+    } catch (reason: unknown) {
+      if (generation === scopeRequestGeneration.current) setError(reason instanceof Error ? reason.message : "The records list could not be reloaded.");
+    } finally {
+      if (generation === scopeRequestGeneration.current) setPageBusy(false);
+    }
+  }
 
   async function saveReview(nextStatus: ReviewStatus): Promise<void> {
     if (selectedEvent === null) return;
+    const event = selectedEvent;
+    const generation = scopeRequestGeneration.current;
     setBusy("review");
     setError(null);
     try {
-      setSnapshot(await reviewEvent(selectedEvent.id, nextStatus, note));
+      const result = await reviewEvent(event.id, nextStatus, note, event.review, scope);
+      if (generation !== scopeRequestGeneration.current) return;
+      noteDrafts.current.delete(event.id);
+      dirtyNoteDrafts.current.delete(event.id);
+      setConflictingReview(null);
+      setSnapshot((current) => mergeReviewedEvent(mergeSnapshot(current, result.snapshot), result.event));
     } catch (reason: unknown) {
-      setError(reason instanceof Error ? reason.message : "The review could not be saved.");
+      if (generation !== scopeRequestGeneration.current) return;
+      if (reason instanceof ApiRequestError && reason.status === 409) {
+        if (reason.event !== null) {
+          setSnapshot((current) => current === null ? current : mergeReviewedEvent(current, reason.event!));
+          setConflictingReview(reason.event.review);
+        }
+        try {
+          const latest = await getSnapshot(scope);
+          if (generation === scopeRequestGeneration.current) setSnapshot((current) => mergeSnapshot(current, latest));
+        } catch {
+          // Keep the user's draft intact; the original conflict remains visible below.
+        }
+        setError("This review changed elsewhere. Your draft is preserved. Compare it with the updated saved note, then save again only if you intend to replace that version.");
+      } else {
+        setError(reason instanceof Error ? reason.message : "The review could not be saved.");
+      }
     } finally {
-      setBusy(null);
+      if (generation === scopeRequestGeneration.current) setBusy(null);
     }
   }
 
   async function toggleWatchlist(): Promise<void> {
     if (selectedEvent === null || selectedEvent.subject.kind !== "issuer") return;
+    const generation = scopeRequestGeneration.current;
     setBusy("watchlist");
     setError(null);
     try {
       const issuer = selectedEvent.subject;
-      setSnapshot(await updateWatchlist(watchedCiks.has(issuer.cik.value) ? "remove" : "add", issuer));
+      const next = await updateWatchlist(watchedCiks.has(issuer.cik.value) ? "remove" : "add", issuer, scope);
+      if (generation === scopeRequestGeneration.current) setSnapshot((current) => mergeSnapshot(current, next));
     } catch (reason: unknown) {
-      setError(reason instanceof Error ? reason.message : "The watchlist could not be updated.");
+      if (generation === scopeRequestGeneration.current) setError(reason instanceof Error ? reason.message : "The watchlist could not be updated.");
     } finally {
-      setBusy(null);
+      if (generation === scopeRequestGeneration.current) setBusy(null);
     }
   }
 
@@ -227,36 +348,42 @@ function App(): ReactElement {
       setError("The selected SEC issuer identity was invalid.");
       return;
     }
+    const generation = scopeRequestGeneration.current;
     setBusy("add");
     setError(null);
     try {
-      const next = await updateWatchlist("add", parsed.data);
-      setSnapshot(next);
+      const next = await updateWatchlist("add", parsed.data, scope);
+      if (generation !== scopeRequestGeneration.current) return;
+      setSnapshot((current) => mergeSnapshot(current, next));
       setIssuerQuery("");
       setIssuerChoice(null);
       if (scope === "watchlist") void runRefresh("watchlist");
     } catch (reason: unknown) {
-      setError(reason instanceof Error ? reason.message : "The issuer could not be added.");
+      if (generation === scopeRequestGeneration.current) setError(reason instanceof Error ? reason.message : "The issuer could not be added.");
     } finally {
-      setBusy(null);
+      if (generation === scopeRequestGeneration.current) setBusy(null);
     }
   }
 
   async function removeIssuer(issuer: Issuer): Promise<void> {
+    const generation = scopeRequestGeneration.current;
     setBusy("watchlist");
     setError(null);
     try {
-      setSnapshot(await updateWatchlist("remove", issuer));
+      const next = await updateWatchlist("remove", issuer, scope);
+      if (generation === scopeRequestGeneration.current) setSnapshot((current) => mergeSnapshot(current, next));
     } catch (reason: unknown) {
-      setError(reason instanceof Error ? reason.message : "The issuer could not be removed from your watchlist.");
+      if (generation === scopeRequestGeneration.current) setError(reason instanceof Error ? reason.message : "The issuer could not be removed from your watchlist.");
     } finally {
-      setBusy(null);
+      if (generation === scopeRequestGeneration.current) setBusy(null);
     }
   }
 
   function chooseScope(next: ScanSource): void {
+    const generation = ++scopeRequestGeneration.current;
     setScope(next);
-    void runRefresh(next);
+    setError(null);
+    void runRefresh(next, generation);
   }
 
   if (snapshot === null) {
@@ -271,13 +398,10 @@ function App(): ReactElement {
           <div className="masthead-left"><h1>News Desk Dealer</h1><span className="byline">by <b>Newsjack</b></span><span className="edition">Investor edition</span></div>
           <div className="controls"><span className={`wire-status ${status.replaceAll(" ", "-")}`}><span className="status-dot" />{status}</span><button className="btn" onClick={() => void runRefresh()} disabled={busy !== null}>{busy === "refresh" ? "Reading…" : "Read the wire"}</button></div>
         </div>
-        <p className="dateline">Edition of {shortDate(new Date().toISOString())} · {scopedEvents.length} categorized records · {snapshot.publicIssuerCoverage === null ? "SEC issuer universe not yet loaded" : `${snapshot.publicIssuerCoverage.activeCoverageIssuers.toLocaleString()} issuers in the active SEC coverage pool`} · {snapshot.watchlist.length} personal issuers</p>
+        <p className="dateline">{snapshot.eventsTotal.toLocaleString()} records in scope · auto-refreshes every 3 minutes</p>
       </header>
 
-      <section className="model-strip" aria-label="TypeSafe AI pipeline status">
-        <div className="model-mark">TS</div><div className="model-copy"><strong>TypeSafe AI</strong><span>typed screening + sorting</span></div>
-        <Metric label="captured" value={scopedEvents.length} /><Metric label="categorized" value={categories.size} /><Metric label="read now" value={reviewCount} /><Metric label="my list" value={snapshot.watchlist.length} /><Metric label="SEC issuers" value={snapshot.publicIssuerCoverage?.eligibleIssuers.toLocaleString() ?? "—"} /><Metric label="live sources" value={[secHealth, federalHealth].filter((health) => health?.freshness === "live").length} /><Metric label="last read" value={snapshot.lastRefreshAt === null ? "—" : shortTime(snapshot.lastRefreshAt)} />
-      </section>
+      
 
       <section className="source-health-strip" aria-label="Active provider health">
         {[...activeSourceHealth, { label: "TypeSafe AI", health: typesafeHealth }].map(({ label, health }) => (
@@ -293,30 +417,31 @@ function App(): ReactElement {
 
       {error !== null && <div className="error-bar" role="alert"><strong>Desk note</strong><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss desk note">×</button></div>}
 
-      <section className="briefing">
-        <div><span className="section-label">The investor desk</span><h2>Which records deserve a first read?</h2><p>TypeSafe AI screens official SEC filings and Federal Register records. Code preserves identity, timing, freshness, and ranking. You decide what matters.</p></div>
-        <div className="scope-panel"><span className="section-label">Read scope</span><div className="scope-tabs" role="tablist" aria-label="Source scope">{SOURCE_OPTIONS.map((option) => <button key={option.value} className={scope === option.value ? "selected" : ""} onClick={() => chooseScope(option.value)} role="tab" aria-selected={scope === option.value}>{option.label}</button>)}</div><span className="scope-note">{SOURCE_OPTIONS.find((option) => option.value === scope)?.note}</span></div>
-      </section>
+      
 
-      <section className="watchbar">
+      
+
+      <main className="newsroom">
+        <section className="wire-section" aria-label="Investor filing wire">
+          <div className="section-heading"><div><span className="vendor">A / {scope === "federal" ? "FEDERAL REGISTER" : scope === "watchlist" ? "SEC WATCHLIST FILINGS" : scope === "all_public" ? "SEC EDGAR · PUBLIC ISSUERS" : "SEC EDGAR + FEDERAL REGISTER"}</span><h2>The wire <span>{filteredEvents.length} loaded · {snapshot.eventsTotal} in scope</span></h2></div><div className="wire-toolbar"><div className="scope-tabs" role="tablist" aria-label="Source scope">{SOURCE_OPTIONS.map((option) => <button key={option.value} className={scope === option.value ? "selected" : ""} onClick={() => chooseScope(option.value)} role="tab" aria-selected={scope === option.value}>{option.label}</button>)}</div><div className="queue-tabs" role="tablist" aria-label="Record queue views">{(["wire", "read_now", "monitor", "reviewed"] as const).map((item) => <button key={item} className={view === item ? "selected" : ""} onClick={() => setView(item)} role="tab" aria-selected={view === item}>{item === "wire" ? "All" : item.replace("_", " ")}</button>)}</div><div className="queue-tabs category-tabs" role="tablist" aria-label="Category desks">{(["all", "operations", "capital_allocation", "governance_legal", "risk_disclosure", "routine_disclosure"] as const).map((item) => <button key={item} className={categoryFilter === item ? "selected" : ""} onClick={() => setCategoryFilter(item)} role="tab" aria-selected={categoryFilter === item}>{item === "all" ? "All desks" : categoryLabel(item)}</button>)}</div></div></div>
+          <div className="wire-grid">{filteredEvents.slice(0, showAllWire ? undefined : 120).map((event) => <WireCard key={event.id} event={event} selected={selectedEvent?.id === event.id} onSelect={() => setSelectedId(event.id)} />)}{filteredEvents.length === 0 && <EmptyWire scope={scope} hasOlder={snapshot.eventsCursor !== null} />}{filteredEvents.length > 120 && <button className="wire-tile wire-more" type="button" onClick={() => setShowAllWire(true)}>Show all {filteredEvents.length.toLocaleString()} loaded records</button>}{(snapshot.eventsCursor !== null || paginationStale) && <div className="wire-foot">{paginationStale
+            ? <button className="wire-expand" type="button" onClick={() => void reloadRecordList()} disabled={pageBusy}>Reload the records list</button>
+            : <button className="wire-expand" type="button" onClick={() => void loadOlderRecords()} disabled={pageBusy}>{pageBusy ? "Loading older records…" : `Load older records · ${Math.max(0, snapshot.eventsTotal - scopedEvents.length).toLocaleString()} remain`}</button>}</div>}</div>
+                    {snapshot.eventsCursor !== null && (paginationStale
+            ? <button className="wire-expand" type="button" onClick={() => void reloadRecordList()} disabled={pageBusy}>Reload the records list</button>
+            : <button className="wire-expand" type="button" onClick={() => void loadOlderRecords()} disabled={pageBusy}>{pageBusy ? "Loading older records…" : `Load older records · ${Math.max(0, snapshot.eventsTotal - scopedEvents.length).toLocaleString()} remain`}</button>)}
+        </section>
+
+        
+
+        
+
+      <aside className="detail-sidebar" aria-label="Record detail and watchlist"><section className="detail-section" aria-label="Selected filing detail"><DeskDetail event={selectedEvent} snapshot={snapshot} note={note} conflictingReview={conflictingReview} setNote={editNote} watched={selectedIssuer !== null && watchedCiks.has(selectedIssuer.cik.value)} onWatchlist={() => void toggleWatchlist()} onReview={(nextStatus) => void saveReview(nextStatus)} onSelect={setSelectedId} busy={busy !== null} /></section><section className="sidebar-watchlist" aria-label="Personal watchlist">
         <div className="watchbar-copy"><span className="section-label">Personal watchlist</span><strong>{snapshot.watchlist.length === 0 ? "No issuers on your list" : `${snapshot.watchlist.length} issuer${snapshot.watchlist.length === 1 ? "" : "s"} on your list`}</strong><span>Search by company or ticker; the SEC identity is resolved and stored automatically.</span></div>
         <WatchlistEntries entries={snapshot.watchlist} busy={busy !== null} onRemove={(issuer) => void removeIssuer(issuer)} />
         <div className="coverage-readout" aria-live="polite"><span className="section-label">Public-company universe · separate from your personal list</span><strong>{snapshot.publicIssuerCoverage === null ? "Awaiting live SEC issuer directory" : `${snapshot.publicIssuerCoverage.eligibleIssuers.toLocaleString()} SEC-listed issuers · ${snapshot.publicIssuerCoverage.activeCoverageIssuers.toLocaleString()} in the rolling scan`}</strong><span>{snapshot.publicIssuerCoverage === null ? "The official SEC exchange directory powers broad company search and a separate, rotating filing scan. Your personal watchlist stays curated." : `${snapshot.publicIssuerCoverage.issuersScanned} checked this pass · next position ${snapshot.publicIssuerCoverage.activeCoverageIssuers === 0 ? "—" : (snapshot.publicIssuerCoverage.offsetAfter % snapshot.publicIssuerCoverage.activeCoverageIssuers + 1).toLocaleString()} of ${snapshot.publicIssuerCoverage.activeCoverageIssuers.toLocaleString()} · ${snapshot.publicIssuerCoverage.recentFilingsFound} recent filings found · ${snapshot.publicIssuerCoverage.recordsScreened} sent through TypeSafe AI · ${snapshot.publicIssuerCoverage.recordsPlaced} records placed · directory retrieved ${shortTime(snapshot.publicIssuerCoverage.retrievedAt)}. The scan is bounded and resumes at its stored cursor; it does not mean every issuer was checked in this pass.`}</span></div>
         <form className="watchlist-form" onSubmit={(event) => void addIssuer(event)}><div className="watchlist-fields"><div className="issuer-picker"><input aria-label="Search public company" role="combobox" aria-expanded={issuerMatches.length > 0} placeholder="Search company or ticker" value={issuerQuery} onChange={(event) => { setIssuerQuery(event.target.value); setIssuerChoice(null); }} />{issuerMatches.length > 0 && <div className="issuer-dropdown" role="listbox">{issuerMatches.map((match) => <button key={match.cik} type="button" role="option" onClick={() => { setIssuerChoice(match); setIssuerQuery(`${match.name} · ${match.ticker}`); setIssuerMatches([]); }}><strong>{match.name}</strong><span>{match.ticker} · {match.exchange}</span></button>)}</div>}{issuerChoice !== null && <small className="issuer-resolved">SEC identity resolved · {issuerChoice.exchange}</small>}</div><button className="btn small" type="submit" disabled={busy !== null || issuerChoice === null}>Add issuer</button></div></form>
-      </section>
-
-      <main className="newsroom">
-        <section className="wire-section" aria-label="Investor filing wire">
-          <div className="section-heading"><div><span className="vendor">A / {scope === "federal" ? "FEDERAL REGISTER" : scope === "watchlist" ? "SEC WATCHLIST FILINGS" : scope === "all_public" ? "SEC EDGAR · PUBLIC ISSUERS" : "SEC EDGAR + FEDERAL REGISTER"}</span><h2>The wire <span>{filteredEvents.length} placed</span></h2></div><div className="queue-tabs" role="tablist" aria-label="Record queue views">{(["wire", "read_now", "monitor", "reviewed"] as const).map((item) => <button key={item} className={view === item ? "selected" : ""} onClick={() => setView(item)} role="tab" aria-selected={view === item}>{item === "wire" ? "All" : item.replace("_", " ")}</button>)}</div></div>
-          <div className="wire-strip">{filteredEvents.slice(0, showAllWire ? undefined : 6).map((event) => <WireCard key={event.id} event={event} selected={selectedEvent?.id === event.id} onSelect={() => setSelectedId(event.id)} />)}{filteredEvents.length === 0 && <EmptyWire scope={scope} />}</div>
-          {filteredEvents.length > 6 && <button className="wire-expand" type="button" aria-expanded={showAllWire} onClick={() => setShowAllWire((current) => !current)}>{showAllWire ? "Show the lead six" : `Show all ${filteredEvents.length} records`}</button>}
-        </section>
-
-        <section className="sorting-card"><div><span className="section-label">B / The desks</span><h2>Sorted by TypeSafe AI</h2><p>{categories.size === 0 ? "The live wire is empty or unavailable." : `${filteredEvents.length} records placed into ${categories.size} semantic desks.`} Read the primary source before making a research judgment.</p></div><div className="sorting-readout"><span>source state</span><strong>{typesafeHealth?.freshness ?? "unavailable"}</strong><small>{typesafeHealth?.message ?? "Waiting for a real TypeSafe AI run."}</small></div></section>
-
-        <section className="desks" aria-label="Categorized filing desks">{(["operations", "capital_allocation", "governance_legal", "risk_disclosure", "routine_disclosure"] as const).map((category) => <DeskPile key={category} category={category} events={categories.get(category) ?? []} selectedId={selectedEvent?.id ?? null} onSelect={setSelectedId} />)}</section>
-
-        <section className="detail-section" aria-label="Selected filing detail"><DeskDetail event={selectedEvent} snapshot={snapshot} note={note} setNote={setNote} watched={selectedIssuer !== null && watchedCiks.has(selectedIssuer.cik.value)} onWatchlist={() => void toggleWatchlist()} onReview={(nextStatus) => void saveReview(nextStatus)} onSelect={setSelectedId} busy={busy !== null} /></section>
+      </section></aside>
       </main>
 
       <footer className="colophon">Source health: SEC {secHealth?.freshness ?? "unavailable"} · Federal Register {federalHealth?.freshness ?? "unavailable"} · TypeSafe AI {typesafeHealth?.freshness ?? "unavailable"} · Finnhub company news {companyNewsHealth?.freshness ?? "not enabled"}. {companyNewsHealth?.message ?? "Finnhub is disabled pending written approval for third-party TypeSafe processing."} Screening is research priority, not a valuation, return forecast, or trade instruction.</footer>
@@ -324,29 +449,38 @@ function App(): ReactElement {
   );
 }
 
-function Metric({ label, value }: { label: string; value: number | string }): ReactElement {
-  return <div className="metric"><span>{label}</span><strong>{value}</strong></div>;
-}
 
 function WireCard({ event, selected, onSelect }: { event: Event; selected: boolean; onSelect: () => void }): ReactElement {
-  const sourceLabel = event.source.provider === "sec" ? "SEC" : event.source.provider === "finnhub_news" ? "FINNHUB" : "FEDERAL";
-  return <button className={`wire-card ${selected ? "selected" : ""}`} onClick={onSelect} aria-pressed={selected}><div className="card-face"><div className="card-type"><div className="card-mast"><b>{subjectCode(event.subject)}</b><span>{sourceLabel} / {event.form}</span><time>{relativeTime(event.availableAt)}</time></div><h4>{event.title}</h4><p>{event.summary}</p><span className="card-number">{String(event.screening.attentionScore).padStart(2, "0")}</span></div></div><div className="card-stamps"><b>{laneLabel(event)}</b><em>{categoryLabel(event.screening.category)}</em><span>{event.screening.attentionScore}/100</span></div></button>;
+  const route = event.screening.decision === "review" ? "review" : event.screening.decision === "watch" ? "monitor" : "passed";
+  return (
+    <button className={`wire-tile ${selected ? "selected" : ""}`} onClick={onSelect} aria-pressed={selected}>
+      <span className="tile-top"><i className={`tile-route ${route}`}>{route}</i><span className="tile-cat">{categoryLabel(event.screening.category)}</span><b className="tile-score">{event.screening.attentionScore}</b></span>
+      <h4>{event.title}</h4>
+      <span className="tile-meta"><b>{subjectCode(event.subject)}</b><span>{event.form}</span><time>{relativeTime(event.availableAt)}</time>{event.screening.level === "coarse" && <em>first pass</em>}</span>
+    </button>
+  );
 }
 
-function DeskPile({ category, events, selectedId, onSelect }: { category: Event["screening"]["category"]; events: Event[]; selectedId: string | null; onSelect: (id: string) => void }): ReactElement {
-  const [showAll, setShowAll] = useState(false);
-  return <section className="desk-pile"><div className="pile-heading"><span className="pile-icon">{category === "capital_allocation" ? "◆" : category === "governance_legal" ? "§" : category === "risk_disclosure" ? "△" : category === "routine_disclosure" ? "·" : "✦"}</span><h3>{categoryLabel(category)}</h3><b>{events.length}</b></div>{events.slice(0, showAll ? undefined : 4).map((event) => <button key={event.id} className={`pile-card ${selectedId === event.id ? "selected" : ""}`} onClick={() => onSelect(event.id)}><span className="pile-source">{subjectCode(event.subject)} · {event.form}</span><strong>{event.title}</strong><span className="pile-foot"><em>read {event.screening.attentionScore}</em><small>{relativeTime(event.availableAt)}</small></span></button>)}{events.length === 0 && <div className="pile-empty">No live records</div>}{events.length > 4 && <button className="pile-expand" type="button" aria-expanded={showAll} onClick={() => setShowAll((current) => !current)}>{showAll ? "Show fewer" : `Show all ${events.length}`}</button>}</section>;
+
+function EmptyWire({ scope, hasOlder }: { scope: ScanSource; hasOlder: boolean }): ReactElement {
+  return <div className="empty-wire"><span className="empty-glyph">∅</span><strong>{hasOlder ? "No matching records on this page" : scope === "watchlist" ? "Your watchlist wire is empty" : "No live records placed"}</strong><p>{hasOlder ? "Load older records to continue searching this queue; matching counts apply to records loaded so far." : "Refresh requires the configured official source and TypeSafe AI credentials. The desk never fills this space with demo data."}</p></div>;
 }
 
-function EmptyWire({ scope }: { scope: ScanSource }): ReactElement {
-  return <div className="empty-wire"><span className="empty-glyph">∅</span><strong>{scope === "watchlist" ? "Your watchlist wire is empty" : "No live records placed"}</strong><p>Refresh requires the configured official source and TypeSafe AI credentials. The desk never fills this space with demo data.</p></div>;
-}
-
-function DeskDetail({ event, snapshot, note, setNote, watched, onWatchlist, onReview, onSelect, busy }: { event: Event | null; snapshot: AppSnapshot; note: string; setNote: (value: string) => void; watched: boolean; onWatchlist: () => void; onReview: (status: ReviewStatus) => void; onSelect: (id: string) => void; busy: boolean }): ReactElement {
+function DeskDetail({ event, snapshot, note, conflictingReview, setNote, watched, onWatchlist, onReview, onSelect, busy }: { event: Event | null; snapshot: AppSnapshot; note: string; conflictingReview: Event["review"] | null; setNote: (value: string) => void; watched: boolean; onWatchlist: () => void; onReview: (status: ReviewStatus) => void; onSelect: (id: string) => void; busy: boolean }): ReactElement {
   if (event === null) return <div className="detail-empty"><span className="empty-glyph">↳</span><h2>Select a record</h2><p>Choose a record from the wire to inspect its source trail and leave a human review note.</p></div>;
   const related = snapshot.events.filter((candidate) => candidate.subject.kind === event.subject.kind && candidate.subject.name === event.subject.name && candidate.id !== event.id).slice(0, 3);
   const canWatch = event.subject.kind === "issuer";
-  return <div className="desk-detail"><div className="detail-kicker"><span>{subjectCode(event.subject)}</span><span>{event.form}</span><span>{categoryLabel(event.screening.category)}</span><span>{event.screening.engine === "typesafe_ai" ? "TypeSafe AI" : event.screening.engine}</span>{canWatch && <button className={watched ? "watch-link active" : "watch-link"} onClick={onWatchlist}>{watched ? "on watchlist" : "track issuer"}</button>}</div><h2>{event.title}</h2><p className="detail-summary">{event.summary}</p><div className="detail-dates"><span><b>{event.kind === "news" ? "published" : "filed"}</b>{shortDate(event.publishedAt)}</span><span><b>available</b>{shortDate(event.availableAt)} · {shortTime(event.availableAt)}</span><span><b>observed</b>{shortDate(event.source.observedAt)} · {shortTime(event.source.observedAt)}</span><span><b>freshness</b>{event.source.freshness}</span></div><div className="attention-strip"><div><span className="section-label">Attention score</span><strong>{event.screening.attentionScore}<small>/100</small></strong></div><p>{event.screening.rationale[0]}</p><span className="lane-stamp">{laneLabel(event)}</span></div><section className="detail-block"><div className="block-heading"><h3>Typed screen</h3><span>{event.screening.modelConfidence}/100 confidence · {categoryLabel(event.screening.category)}</span></div><div className="driver-grid"><Driver label="Materiality" value={event.screening.materiality} /><Driver label="Novelty" value={event.screening.novelty} /><Driver label="Market sensitivity" value={event.screening.marketSensitivity} /><Driver label="Thesis link" value={event.screening.thesisMatch} /></div><p className="fine-print">Source reliability {event.screening.sourceReliability}/100 · evidence {event.screening.evidenceComplete ? "complete" : "incomplete"}. TypeSafe AI screens; code ranks; a person decides.</p></section><section className="detail-block"><div className="block-heading"><h3>Source evidence</h3><span>{event.evidence[0].capture === "content" ? "captured" : "reference only"}</span></div><a className="source-link" href={event.source.url} target="_blank" rel="noreferrer"><span>{event.evidence[0].label}</span><b>Open source ↗</b></a><p className="excerpt">“{event.evidence[0].excerpt}”</p><div className="lineage"><span>native ID <b>{event.source.nativeId}</b></span><span>digest <b>{event.source.digest.slice(0, 16)}…</b></span></div></section>{related.length > 0 && <section className="detail-block related"><div className="block-heading"><h3>Same subject, nearby</h3><span>{related.length} records</span></div>{related.map((candidate) => <button key={candidate.id} onClick={() => onSelect(candidate.id)}><span>{candidate.title}</span><b>{candidate.screening.attentionScore}</b></button>)}</section>}<section className="review-block"><div className="block-heading"><h3>Human review</h3><span>{event.review.status}</span></div><textarea aria-label="Review note" value={note} onChange={(entry) => setNote(entry.target.value)} placeholder="What does this change in your research question?" /><div className="review-actions"><button className="btn ghost" disabled={busy} onClick={() => onReview("snoozed")}>Snooze</button><button className="btn ghost" disabled={busy} onClick={() => onReview("dismissed")}>Dismiss</button><button className="btn" disabled={busy} onClick={() => onReview("reviewed")}>Save review</button></div></section></div>;
+  const drivers: Array<{ label: string; value: number }> = [
+    { label: "materiality", value: event.screening.materiality },
+    { label: "novelty", value: event.screening.novelty },
+    { label: "market sensitivity", value: event.screening.marketSensitivity },
+    { label: "thesis match", value: event.screening.thesisMatch },
+  ].sort((left, right) => right.value - left.value).slice(0, 2);
+  const whySurfaced = `Strongest signals: ${drivers.map((driver) => `${driver.value >= 75 ? "high" : driver.value >= 50 ? "elevated" : "low"} ${driver.label}`).join(", ")}.`;
+  const clarityNote = event.screening.level === "coarse"
+    ? "First pass — judged on filing metadata only. Open the source for the full document."
+    : event.screening.evidenceComplete ? "" : "The captured document text was cut short; the full filing contains more.";
+  return <div className="desk-detail"><div className="detail-kicker"><span>{subjectCode(event.subject)}</span><span>{event.form}</span><span>{categoryLabel(event.screening.category)}</span>{canWatch && <button className={watched ? "watch-link active" : "watch-link"} onClick={onWatchlist}>{watched ? "on watchlist" : "track issuer"}</button>}</div><h2>{event.title}</h2><div className="detail-dates"><span><b>{event.kind === "news" ? "published" : "filed"}</b>{shortDate(event.publishedAt)} · {shortTime(event.availableAt)}</span></div>{event.marketContext && <p className="market-check"><b>Market check</b> shares {event.marketContext.changePercent > 0 ? "+" : ""}{event.marketContext.changePercent.toFixed(1)}% from the {shortDate(event.marketContext.baselineDate)} close to the {shortDate(event.marketContext.latestDate)} close · Yahoo Finance</p>}<div className="attention-strip"><div><span className="section-label">Attention score</span><strong>{event.screening.attentionScore}<small>/100</small></strong></div><p>{whySurfaced}</p><span className="lane-stamp">{laneLabel(event)}</span></div>{clarityNote && <p className="screening-limitations" aria-label="Screening limitations">{clarityNote}</p>}<section className="detail-block"><div className="block-heading"><h3>Why this surfaced</h3><span>{event.screening.modelConfidence}% confidence</span></div><div className="driver-grid"><Driver label="Materiality" value={event.screening.materiality} /><Driver label="Novelty" value={event.screening.novelty} /><Driver label="Market sensitivity" value={event.screening.marketSensitivity} /><Driver label="Thesis link" value={event.screening.thesisMatch} /></div></section><section className="detail-block source"><div className="block-heading"><h3>Primary source</h3></div><a className="source-link" href={event.source.url} target="_blank" rel="noreferrer"><span>{event.evidence[0].label}</span><b>Open source ↗</b></a></section>{related.length > 0 && <section className="detail-block related"><div className="block-heading"><h3>Same subject, nearby</h3><span>{related.length} records</span></div>{related.map((candidate) => <button key={candidate.id} onClick={() => onSelect(candidate.id)}><span>{candidate.title}</span><b>{candidate.screening.attentionScore}</b></button>)}</section>}<section className="review-block"><div className="block-heading"><h3>Human review</h3><span>{event.review.status}</span></div><textarea aria-label="Review note" value={note} onChange={(entry) => setNote(entry.target.value)} placeholder="What does this change in your research question?" />{conflictingReview !== null && <p className="review-conflict">Saved elsewhere ({conflictingReview.status}): {conflictingReview.note || "No note"}. Your draft remains above.</p>}<div className="review-actions"><button className="btn ghost" disabled={busy} onClick={() => onReview("snoozed")}>Snooze</button><button className="btn ghost" disabled={busy} onClick={() => onReview("dismissed")}>Dismiss</button><button className="btn" disabled={busy} onClick={() => onReview("reviewed")}>Save review</button></div></section></div>;
 }
 
 function Driver({ label, value }: { label: string; value: number }): ReactElement {
