@@ -378,7 +378,7 @@ func TestInvestorCleanExcerptSkipsXBRLContext(t *testing.T) {
 func TestInvestorFinishSummaryHeadlineCutsLongSentencesAtWordBoundary(t *testing.T) {
 	long := strings.Repeat("word ", 50)
 	got := investorFinishSummaryHeadline(long)
-	cut := strings.LastIndex(long[:140], " ")
+	cut := strings.LastIndex(long[:200], " ")
 	want := long[:cut] + "\u2026"
 	if got != want {
 		t.Fatalf("long headline = %q, want the word-bounded cut %q", got, want)

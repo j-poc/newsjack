@@ -398,7 +398,7 @@ function App(): ReactElement {
           <div className="masthead-left"><h1>News Desk Dealer</h1><span className="byline">by <b>Newsjack</b></span><span className="edition">Investor edition</span></div>
           <div className="controls"><span className={`wire-status ${status.replaceAll(" ", "-")}`}><span className="status-dot" />{status}</span><button className="btn" onClick={() => void runRefresh()} disabled={busy !== null}>{busy === "refresh" ? "Reading…" : "Read the wire"}</button></div>
         </div>
-        <p className="dateline">{snapshot.eventsTotal.toLocaleString()} records in scope · auto-refreshes every 3 minutes</p>
+        <p className="dateline">Showing the {filteredEvents.length.toLocaleString()} strongest of {snapshot.eventsTotal.toLocaleString()} records screened this week · strongest first · auto-refreshes every 3 minutes</p>
       </header>
 
       
@@ -407,7 +407,7 @@ function App(): ReactElement {
         {[...activeSourceHealth, { label: "TypeSafe AI", health: typesafeHealth }].map(({ label, health }) => (
           <div className={`source-health-item ${health?.status ?? "offline"}`} key={label}>
             <strong>{label}</strong>
-            <span>{health === undefined ? "not checked · delivery unavailable" : `${health.status} · ${health.freshness} · ${health.freshness === "live" ? "network delivery" : "no current delivery"} · checked ${shortTime(health.checkedAt)}`}</span>
+            <span>{health === undefined ? "not checked" : health.freshness === "stale" ? `last pull ${relativeTime(health.checkedAt)}` : `live · updated ${relativeTime(health.checkedAt)}`}</span>
             <small>{health?.message ?? "No accepted live source result has been recorded yet."}</small>
           </div>
         ))}
@@ -415,7 +415,7 @@ function App(): ReactElement {
 
       {(scope === "all" || scope === "federal") && <p className="legal-source-note">FederalRegister.gov records are informational renditions. For legal reliance, check the official edition in <a href="https://www.govinfo.gov/app/collection/fr" target="_blank" rel="noreferrer">govinfo</a>.</p>}
 
-      {error !== null && <div className="error-bar" role="alert"><strong>Desk note</strong><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss desk note">×</button></div>}
+      {error !== null && !error.includes("already in progress") && <div className="error-bar" role="alert"><strong>Desk note</strong><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss desk note">×</button></div>}
 
       
 
@@ -423,7 +423,7 @@ function App(): ReactElement {
 
       <main className="newsroom">
         <section className="wire-section" aria-label="Investor filing wire">
-          <div className="section-heading"><div><span className="vendor">A / {scope === "federal" ? "FEDERAL REGISTER" : scope === "watchlist" ? "SEC WATCHLIST FILINGS" : scope === "all_public" ? "SEC EDGAR · PUBLIC ISSUERS" : "SEC EDGAR + FEDERAL REGISTER"}</span><h2>The wire <span>{filteredEvents.length} loaded · {snapshot.eventsTotal} in scope</span></h2></div><div className="wire-toolbar"><div className="scope-tabs" role="tablist" aria-label="Source scope">{SOURCE_OPTIONS.map((option) => <button key={option.value} className={scope === option.value ? "selected" : ""} onClick={() => chooseScope(option.value)} role="tab" aria-selected={scope === option.value}>{option.label}</button>)}</div><div className="queue-tabs" role="tablist" aria-label="Record queue views">{(["wire", "read_now", "monitor", "reviewed"] as const).map((item) => <button key={item} className={view === item ? "selected" : ""} onClick={() => setView(item)} role="tab" aria-selected={view === item}>{item === "wire" ? "All" : item.replace("_", " ")}</button>)}</div><div className="queue-tabs category-tabs" role="tablist" aria-label="Category desks">{(["all", "operations", "capital_allocation", "governance_legal", "risk_disclosure", "routine_disclosure"] as const).map((item) => <button key={item} className={categoryFilter === item ? "selected" : ""} onClick={() => setCategoryFilter(item)} role="tab" aria-selected={categoryFilter === item}>{item === "all" ? "All desks" : categoryLabel(item)}</button>)}</div></div></div>
+          <div className="section-heading"><div><h2>The wire <span>{filteredEvents.length} loaded · {snapshot.eventsTotal} in scope</span></h2></div><div className="wire-toolbar"><div className="scope-tabs" role="tablist" aria-label="Source scope">{SOURCE_OPTIONS.map((option) => <button key={option.value} className={scope === option.value ? "selected" : ""} onClick={() => chooseScope(option.value)} role="tab" aria-selected={scope === option.value}>{option.label}</button>)}</div><div className="queue-tabs" role="tablist" aria-label="Record queue views">{(["wire", "read_now", "monitor", "reviewed"] as const).map((item) => <button key={item} className={view === item ? "selected" : ""} onClick={() => setView(item)} role="tab" aria-selected={view === item}>{item === "wire" ? "All" : item.replace("_", " ")}</button>)}</div><div className="queue-tabs category-tabs" role="tablist" aria-label="Category desks">{(["all", "operations", "capital_allocation", "governance_legal", "risk_disclosure", "routine_disclosure"] as const).map((item) => <button key={item} className={categoryFilter === item ? "selected" : ""} onClick={() => setCategoryFilter(item)} role="tab" aria-selected={categoryFilter === item}>{item === "all" ? "All desks" : categoryLabel(item)}</button>)}</div></div></div>
           <div className="wire-grid">{filteredEvents.slice(0, showAllWire ? undefined : 120).map((event) => <WireCard key={event.id} event={event} selected={selectedEvent?.id === event.id} onSelect={() => setSelectedId(event.id)} />)}{filteredEvents.length === 0 && <EmptyWire scope={scope} hasOlder={snapshot.eventsCursor !== null} />}{filteredEvents.length > 120 && <button className="wire-tile wire-more" type="button" onClick={() => setShowAllWire(true)}>Show all {filteredEvents.length.toLocaleString()} loaded records</button>}{(snapshot.eventsCursor !== null || paginationStale) && <div className="wire-foot">{paginationStale
             ? <button className="wire-expand" type="button" onClick={() => void reloadRecordList()} disabled={pageBusy}>Reload the records list</button>
             : <button className="wire-expand" type="button" onClick={() => void loadOlderRecords()} disabled={pageBusy}>{pageBusy ? "Loading older records…" : `Load older records · ${Math.max(0, snapshot.eventsTotal - scopedEvents.length).toLocaleString()} remain`}</button>}</div>}</div>

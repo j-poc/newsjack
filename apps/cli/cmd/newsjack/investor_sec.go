@@ -287,14 +287,16 @@ func parseSECInvestorTime(raw, fallbackPrecision string) (investorTime, error) {
 
 func normalizeInvestorDocument(raw []byte, maxChars int) (string, bool, string) {
 	value := string(raw)
-	// Full submission files begin with an <SEC-HEADER> block of machine
-	// metadata (accession numbers, .hdr.sgml filenames, acceptance stamps);
-	// everything before the first document is envelope, not content.
-	if header := strings.Index(value, "<SEC-HEADER"); header >= 0 {
+	// Full submission files begin with envelope metadata — an <SEC-HEADER>
+	// block (accession numbers, .hdr.sgml filenames, acceptance stamps) or
+	// bare <ACCEPTANCE-DATETIME>/<ACCESSION-NUMBER> headers — before the
+	// first <DOCUMENT>. Everything before the first document is envelope,
+	// not content.
+	if document := strings.Index(value, "<DOCUMENT>"); document >= 0 && document <= 8000 {
+		value = value[document:]
+	} else if header := strings.Index(value, "<SEC-HEADER"); header >= 0 {
 		if end := strings.Index(value[header:], "</SEC-HEADER>"); end >= 0 {
 			value = value[header+end+len("</SEC-HEADER>"):]
-		} else if document := strings.Index(value, "<DOCUMENT>"); document >= 0 {
-			value = value[document:]
 		}
 	}
 	value = investorHTMLCommentPattern.ReplaceAllString(value, " ")

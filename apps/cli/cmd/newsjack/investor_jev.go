@@ -436,7 +436,7 @@ func investorCompressHeadline(title, issuerName string) string {
 		return trimmed
 	}
 	original := trimmed
-	for strip := 0; strip < 3; strip++ {
+	for strip := 0; strip < 4; strip++ {
 		before := trimmed
 		if match := investorDateClauseInside.FindString(trimmed); match != "" && len(match) <= 64 {
 			trimmed = strings.TrimSpace(trimmed[len(match):])
@@ -446,13 +446,34 @@ func investorCompressHeadline(title, issuerName string) string {
 		if match := investorPreambleClause.FindString(trimmed); match != "" && len(match) <= 110 {
 			trimmed = strings.TrimSpace(trimmed[len(match):])
 		}
+		// Quoted-alias parentheticals — (the "Company"), ("Menarini") — are
+		// envelope furniture; strip them at the head of the remainder.
+		for strings.HasPrefix(trimmed, "(") {
+			if close := strings.Index(trimmed, ")"); close >= 0 && close <= 90 {
+				trimmed = strings.TrimSpace(trimmed[close+1:])
+			} else {
+				break
+			}
+		}
+		// Co-actor clauses — "along with its partner Menarini Group
+		// ("Menarini")" — sit between the issuer and the verb; strip them.
+		if match := investorCoActorClause.FindString(trimmed); match != "" && len(match) <= 140 {
+			trimmed = strings.TrimSpace(trimmed[len(match):])
+		}
+		// Reporting-verb scaffolding — "announced that", "said that" — delays
+		// the action; the action itself is the headline.
+		if match := investorReportingVerbClause.FindString(trimmed); match != "" && len(match) <= 24 {
+			trimmed = strings.TrimSpace(trimmed[len(match):])
+		}
 		if issuerName != "" {
 			name := strings.TrimSpace(issuerName)
 			if len(trimmed) >= len(name) && strings.EqualFold(trimmed[:len(name)], name) {
 				trimmed = strings.TrimLeft(strings.TrimSpace(trimmed[len(name):]), ", ")
-				if strings.HasPrefix(trimmed, "(") {
+				for strings.HasPrefix(trimmed, "(") {
 					if close := strings.Index(trimmed, ")"); close >= 0 && close <= 90 {
 						trimmed = strings.TrimSpace(trimmed[close+1:])
+					} else {
+						break
 					}
 				}
 				trimmed = strings.TrimLeft(trimmed, ", ")
@@ -466,11 +487,14 @@ func investorCompressHeadline(title, issuerName string) string {
 	if trimmed == "" || !unicode.IsLetter(runes[0]) {
 		// A strip step produced a fragment that is not a sentence opening
 		// (". (the ..." and friends); the untouched sentence reads better.
-		return truncateHeadline(strings.TrimSpace(original), 140)
+		return truncateHeadline(strings.TrimSpace(original), 200)
 	}
 	runes[0] = unicode.ToUpper(runes[0])
-	return truncateHeadline(string(runes), 140)
+	return truncateHeadline(string(runes), 200)
 }
+
+var investorCoActorClause = regexp.MustCompile(`(?i)^along with (?:its |their )?[a-z ]{0,60}\([^)]{1,80}\)\s*`)
+var investorReportingVerbClause = regexp.MustCompile(`(?i)^(announced|said|disclosed|reported|revealed|stated) that\s+`)
 
 var investorPreambleClause = regexp.MustCompile(`(?i)^(pursuant to [^,]{0,90},|subject to [^,]{0,70},|as previously disclosed,|in connection with the transactions contemplated hereby,)\s*`)
 
@@ -651,14 +675,14 @@ func investorSentenceIsCoverPageNoise(sentence string) bool {
 }
 
 func investorFinishSummaryHeadline(candidate string) string {
-	if len(candidate) > 140 {
-		return truncateHeadline(candidate, 140)
+	if len(candidate) > 200 {
+		return truncateHeadline(candidate, 200)
 	}
 	punctuation := strings.TrimRight(candidate, "\"'”)]}")
 	if strings.HasSuffix(punctuation, ".") || strings.HasSuffix(punctuation, "!") || strings.HasSuffix(punctuation, "?") {
-		return truncate(candidate, 140)
+		return truncate(candidate, 200)
 	}
-	return truncate(candidate+".", 140)
+	return truncate(candidate+".", 200)
 }
 
 // truncateHeadline cuts at a word boundary and marks the elision, so a long
@@ -667,11 +691,22 @@ func truncateHeadline(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	cut := strings.LastIndex(s[:n], " ")
+	// Cut at the last clause boundary inside the cap so a trimmed headline
+	// never ends mid-thought when a clean break exists.
+	head := s[:n]
+	cut := -1
+	for _, marker := range []string{"; ", ". ", "! ", "? ", ", ", " and ", " or "} {
+		if index := strings.LastIndex(head, marker); index > cut {
+			cut = index + len(marker) - 1
+		}
+	}
+	if cut < n/2 {
+		cut = strings.LastIndex(head, " ")
+	}
 	if cut < n/2 {
 		cut = n
 	}
-	return strings.TrimSpace(s[:cut]) + "…"
+	return strings.TrimSpace(head[:cut]) + "…"
 }
 
 func investorTextIsURL(text string) bool {
