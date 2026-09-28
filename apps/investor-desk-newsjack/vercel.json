@@ -1,11 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "pnpm build:vercel && bash scripts/bundle-vercel-functions.sh",
+  "buildCommand": "pnpm build:vercel",
   "installCommand": "pnpm install --frozen-lockfile",
   "outputDirectory": "dist/client",
   "regions": ["iad1"],
   "functions": {
-    "api/**/*.js": {
+    "api/**/*.ts": {
       "maxDuration": 60,
       "includeFiles": "{drizzle/**/*.sql,node_modules/@libsql/**,node_modules/libsql/**}"
     }
