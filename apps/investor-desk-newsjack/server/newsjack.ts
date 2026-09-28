@@ -428,7 +428,10 @@ export async function runInvestorScan(entries: readonly WatchlistEntry[], source
   await fs.mkdir(runDirectory, { recursive: true });
   const watchlistPath = path.join(runDirectory, "watchlist.json");
   if (source === "watchlist") await fs.writeFile(watchlistPath, watchlistDocument(entries), "utf8");
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  // The stream re-discovers filings across this window; weekends need more
+  // than 24 hours for a Monday desk to see Friday's filings.
+  const sinceHours = Math.max(24, Number(process.env.NEWSJACK_STREAM_SINCE_HOURS ?? 24) || 24);
+  const since = new Date(Date.now() - sinceHours * 60 * 60 * 1000).toISOString();
   const maxIssuers = process.env.NEWSJACK_MAX_ISSUERS ?? "500";
   const maxFilings = process.env.NEWSJACK_MAX_FILINGS_PER_ISSUER ?? "12";
   const maxCompanyNewsItems = process.env.NEWSJACK_MAX_COMPANY_NEWS_ITEMS ?? "500";

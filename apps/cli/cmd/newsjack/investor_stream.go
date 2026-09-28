@@ -362,8 +362,16 @@ func scanInvestorStream(since time.Time, watchlist investorWatchlist, opts inves
 	for day := since.UTC().Truncate(24 * time.Hour); day.Before(today); day = day.Add(24 * time.Hour) {
 		body, err := investorHTTPGet(investorDailyIndexURL(day), opts.UserAgent, opts.Timeout)
 		if err != nil {
-			engine["stream_index_failures"] = intValue(engine["stream_index_failures"], 0) + 1
-			indexFailures = append(indexFailures, investorSourceFailure{Stage: "sec_stream_index", Identity: day.Format("2006-01-02"), Error: cleanError(err.Error())})
+			// The master index is served from www.sec.gov, whose edge blocks
+			// more aggressively than the full-text API; fall back to the same
+			// official feed for that day rather than losing it.
+			fallback, fallbackErr := investorFetchLiveIndex(day, formList, opts)
+			if fallbackErr != nil {
+				engine["stream_index_failures"] = intValue(engine["stream_index_failures"], 0) + 1
+				indexFailures = append(indexFailures, investorSourceFailure{Stage: "sec_stream_index", Identity: day.Format("2006-01-02"), Error: cleanError(err.Error())})
+				continue
+			}
+			rows = append(rows, fallback...)
 			continue
 		}
 		rows = append(rows, parseInvestorDailyIndexRows(body, forms)...)

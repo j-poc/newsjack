@@ -267,6 +267,9 @@ var investorActionVerbPattern = regexp.MustCompile(`(?i)\b(announce|enter|acquir
 var investorAmountPattern = regexp.MustCompile(`([$€£]\s?\d|\b\d+(\.\d+)?\s?(million|billion)\b|\b\d+(\.\d+)?%)`)
 var investorProceduralPattern = regexp.MustCompile(`(?i)(exhibit \d|incorporat|is filed as|press release is|item \d\.\d{2}|current report on form|furnished herewith|signature page|power of attorney|pursuant to the requirements|solely for)`)
 var investorTechnicalPattern = regexp.MustCompile(`(?i)(formula|calculated using|assuming long-term|=[\d.,]+\s*[+*/-])`)
+var investorCompanyDescriptionPattern = regexp.MustCompile(`(?i)\b(is|are) (a|an) (global|leading|premier|diversified|provider|manufacturer|designer|developer|leader|supplier|platform)`)
+var investorContractTermPattern = regexp.MustCompile(`(?i)\b(has|have) an? initial (seven|five|three|ten)[- ]?(year|month) term\b`)
+
 var investorAddressPattern = regexp.MustCompile(`(?i)(suite \d|avenue|boulevard|tower|pavilion|floor,|zip code)`)
 
 // investorSentenceSignalScore ranks candidate sentences by how much an
@@ -295,6 +298,9 @@ func investorSentenceSignalScore(sentence string) int {
 	}
 	if investorTechnicalPattern.MatchString(sentence) {
 		score -= 4
+	}
+	if investorCompanyDescriptionPattern.MatchString(sentence) || investorContractTermPattern.MatchString(sentence) {
+		score -= 3
 	}
 	// Density: a 700-character sentence whose payoff lands past the headline
 	// cap reads worse than a short punchy one with the same verbs.
