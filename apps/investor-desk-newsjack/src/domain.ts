@@ -151,6 +151,11 @@ export const ReviewSchema = z.object({
 }).strict();
 export type Review = z.infer<typeof ReviewSchema>;
 
+export const MarketPointSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  close: z.number().finite().positive(),
+}).strict();
+
 export const MarketContextSchema = z.object({
   ticker: z.string().min(1),
   baselineDate: InstantSchema,
@@ -160,6 +165,8 @@ export const MarketContextSchema = z.object({
   changePercent: z.number().finite(),
   source: z.literal("yahoo_finance"),
   observedAt: InstantSchema,
+  series: z.array(MarketPointSchema).optional(),
+  filedIndex: z.number().int().min(0).optional(),
 }).strict();
 export type MarketContext = z.infer<typeof MarketContextSchema>;
 

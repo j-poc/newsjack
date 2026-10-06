@@ -186,3 +186,13 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .001ms !important; }
 }
+
+.tile-spark { display: block; margin: 1px 0 0; }
+.filing-chart { display: block; margin: 0 auto; }
+.market-block { display: grid; gap: 4px; border: 1px solid var(--line-soft); border-left: 3px solid var(--green); background: var(--paper-2); padding: 7px 9px; }
+.market-block .market-check { margin: 0; border: 0; background: transparent; padding: 0; }
+.news-block .news-item { display: grid; gap: 1px; width: 100%; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; padding: 6px 0; color: var(--ink); font-family: var(--serif); text-align: left; text-decoration: none; }
+.news-block .news-item:hover span, .news-block .news-item:hover { color: var(--pink-dark); }
+.news-block .news-item span { display: -webkit-box; overflow: hidden; font-size: 12px; line-height: 1.25; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.news-block .news-item em { color: var(--muted); font-family: var(--mono); font-size: 8px; text-transform: uppercase; }
+.news-empty { margin: 0; color: var(--muted); font-family: var(--serif); font-size: 11px; font-style: italic; }

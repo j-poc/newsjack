@@ -8,6 +8,7 @@ import {
 } from "../src/domain";
 import { EventPageChangedError, SignalDeskDatabase } from "./db";
 import { searchSecIssuers } from "./issuer-directory";
+import { fetchIssuerNews } from "../worker/issuer-news";
 import { dataRoot, pruneRunDirectories, runInvestorScan } from "./newsjack";
 
 const port = Number(process.env.PORT ?? 8789);
@@ -38,6 +39,10 @@ app.get("/api/events", (request, response) => {
   }
 });
 
+app.get("/api/issuers/news", async (request, response) => {
+  const ticker = typeof request.query.ticker === "string" ? request.query.ticker : "";
+  response.json(await fetchIssuerNews(ticker, fetch));
+});
 app.get("/api/issuers/search", async (request, response) => {
   try {
     response.json(await searchSecIssuers(typeof request.query.q === "string" ? request.query.q : ""));

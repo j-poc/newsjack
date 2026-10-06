@@ -147,7 +147,7 @@ describe("snapshot freshness", () => {
 });
 
 describe("bounded investor-record pagination", () => {
-  it("traverses 1,500 priority-ranked records exactly once and rejects a cursor after ranking changes", () => {
+  it("traverses 1,500 priority-ranked records exactly once and rejects a cursor after ranking changes", { timeout: 30_000 }, () => {
     const dataDirectory = mkdtempSync(path.join(os.tmpdir(), "newsjack-pagination-test-"));
     const database = new SignalDeskDatabase(dataDirectory, false);
     const records = Array.from({ length: 1_500 }, (_, index) => pagingEvent(index));

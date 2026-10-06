@@ -342,6 +342,10 @@ export function eventFromItem(item: InvestorAuditItem): Event {
         changePercent: raw.change_percent,
         source: raw.source,
         observedAt: raw.observed_at,
+        ...(raw.series !== undefined && raw.filed_index !== undefined ? {
+          series: raw.series,
+          filedIndex: raw.filed_index,
+        } : {}),
       });
       return parsed.success ? { marketContext: parsed.data } : {};
     })()),

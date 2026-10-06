@@ -52,6 +52,66 @@ function relativeTime(value: string): string {
   return `${Math.round(minutes / 1440)}d ago`;
 }
 
+function Sparkline({ event }: { event: Event }): ReactElement | null {
+  const series = event.marketContext?.series;
+  if (!series || series.length < 2) return null;
+  const width = 208;
+  const height = 34;
+  const filedIndex = Math.min(event.marketContext?.filedIndex ?? 0, series.length - 1);
+  const closes = series.map((point) => point.close);
+  const min = Math.min(...closes);
+  const max = Math.max(...closes);
+  const span = max - min || 1;
+  const x = (index: number) => (index / (series.length - 1)) * (width - 2) + 1;
+  const y = (close: number) => height - 3 - ((close - min) / span) * (height - 8);
+  const path = series.map((point, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(point.close).toFixed(1)}`).join(" ");
+  const first = series[0].close;
+  const last = series[series.length - 1].close;
+  const up = last >= first;
+  return (
+    <svg className="tile-spark" width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true">
+      <path d={path} fill="none" stroke={up ? "var(--green)" : "var(--pink-dark)"} strokeWidth="1.4" />
+      <line x1={x(filedIndex)} x2={x(filedIndex)} y1="2" y2={height - 2} stroke="var(--muted)" strokeWidth="0.6" strokeDasharray="2 2" />
+      <circle cx={x(series.length - 1)} cy={y(last)} r="2" fill={up ? "var(--green)" : "var(--pink-dark)"} />
+    </svg>
+  );
+}
+
+function FilingChart({ event }: { event: Event }): ReactElement | null {
+  const context = event.marketContext;
+  const series = context?.series;
+  if (!context || !series || series.length < 2) return null;
+  const width = 360;
+  const height = 110;
+  const filedIndex = Math.min(context.filedIndex ?? 0, series.length - 1);
+  const closes = series.map((point) => point.close);
+  const min = Math.min(...closes);
+  const max = Math.max(...closes);
+  const span = max - min || 1;
+  const padX = 6;
+  const x = (index: number) => (index / (series.length - 1)) * (width - padX * 2) + padX;
+  const y = (close: number) => height - 22 - ((close - min) / span) * (height - 40);
+  const path = series.map((point, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(point.close).toFixed(1)}`).join(" ");
+  const up = context.changePercent >= 0;
+  const color = up ? "var(--green)" : "var(--pink-dark)";
+  const filedX = x(filedIndex);
+  const first = series[0];
+  const last = series[series.length - 1];
+  return (
+    <svg className="filing-chart" width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Price chart for ${context.ticker}: ${context.changePercent.toFixed(1)}% from the filing-week close to the latest close`}>
+      <line x1={filedX} x2={filedX} y1="6" y2={height - 18} stroke="var(--line)" strokeWidth="0.8" strokeDasharray="3 3" />
+      <text x={filedX + 4} y="12" fontSize="8" fill="var(--muted)" fontFamily="var(--mono)">filed</text>
+      <path d={path} fill="none" stroke={color} strokeWidth="1.6" />
+      <circle cx={x(filedIndex)} cy={y(series[filedIndex].close)} r="2.6" fill="var(--ink)" />
+      <circle cx={x(series.length - 1)} cy={y(last.close)} r="2.6" fill={color} />
+      <text x={padX} y={height - 6} fontSize="8" fill="var(--muted)" fontFamily="var(--mono)">{series[0].date.slice(5)}</text>
+      <text x={width - padX} y={height - 6} fontSize="8" fill="var(--muted)" fontFamily="var(--mono)" textAnchor="end">{last.date.slice(5)}</text>
+      <text x={width - padX} y="12" fontSize="10" fill={color} fontFamily="var(--mono)" textAnchor="end">{context.changePercent > 0 ? "+" : ""}{context.changePercent.toFixed(1)}%</text>
+      <text x={filedX + 4} y={y(series[filedIndex].close) - 5} fontSize="8" fill="var(--ink)" fontFamily="var(--mono)">{context.baselineClose.toFixed(2)}</text>
+    </svg>
+  );
+}
+
 function laneLabel(event: Event): string {
   if (event.screening.decision === "review") return "review";
   if (event.screening.decision === "watch") return "monitor";
@@ -106,6 +166,7 @@ function App(): ReactElement {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<QueueView>("wire");
   const [categoryFilter, setCategoryFilter] = useState<"all" | Event["screening"]["category"]>("all");
+  const [issuerNews, setIssuerNews] = useState<{ items: Array<{ title: string; url: string; publisher: string; publishedAt: string }>; note: string } | null>(null);
   const [scope, setScope] = useState<ScanSource>(initialScanScope);
   const [busy, setBusy] = useState<"loading" | "refresh" | "review" | "watchlist" | "add" | null>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -169,6 +230,7 @@ function App(): ReactElement {
     if (typeof window !== "undefined") window.localStorage.setItem("newsjack.scanScope", scope);
   }, [scope]);
 
+
   useEffect(() => {
     if (snapshot === null) return;
     const timer = window.setInterval(() => void runRefresh(scope), 3 * 60 * 1000);
@@ -179,6 +241,17 @@ function App(): ReactElement {
   const scopedEvents = useMemo(() => eventsForScope(snapshot?.events ?? [], scope, watchedCiks), [snapshot, scope, watchedCiks]);
   const filteredEvents = useMemo(() => filterEvents(scopedEvents, view).filter((event) => categoryFilter === "all" || event.screening.category === categoryFilter), [scopedEvents, view, categoryFilter]);
   const selectedEvent = useMemo(() => filteredEvents.find((event) => event.id === selectedId) ?? filteredEvents[0] ?? null, [filteredEvents, selectedId]);
+  useEffect(() => {
+    const subject = selectedEvent?.subject;
+    const ticker = subject !== undefined && subject.kind === "issuer" ? subject.ticker.value : "";
+    if (ticker === "" || ticker.startsWith("CIK")) { setIssuerNews(null); return; }
+    let cancelled = false;
+    fetch(`/api/issuers/news?ticker=${encodeURIComponent(ticker)}`)
+      .then((response) => (response.ok ? response.json() : { items: [], note: "Market news feed unavailable." }))
+      .then((result) => { if (!cancelled) setIssuerNews(result); })
+      .catch(() => { if (!cancelled) setIssuerNews({ items: [], note: "Market news feed unavailable." }); });
+    return () => { cancelled = true; };
+  }, [selectedEvent?.id]);
   const secHealth = snapshot?.sourceHealth.find((health) => health.provider === "sec");
   const federalHealth = snapshot?.sourceHealth.find((health) => health.provider === "federal_register");
   const companyNewsHealth = snapshot?.sourceHealth.find((health) => health.provider === "finnhub_news");
@@ -436,7 +509,7 @@ function App(): ReactElement {
 
         
 
-      <aside className="detail-sidebar" aria-label="Record detail and watchlist"><section className="detail-section" aria-label="Selected filing detail"><DeskDetail event={selectedEvent} snapshot={snapshot} note={note} conflictingReview={conflictingReview} setNote={editNote} watched={selectedIssuer !== null && watchedCiks.has(selectedIssuer.cik.value)} onWatchlist={() => void toggleWatchlist()} onReview={(nextStatus) => void saveReview(nextStatus)} onSelect={setSelectedId} busy={busy !== null} /></section><section className="sidebar-watchlist" aria-label="Personal watchlist">
+      <aside className="detail-sidebar" aria-label="Record detail and watchlist"><section className="detail-section" aria-label="Selected filing detail"><DeskDetail event={selectedEvent} snapshot={snapshot} note={note} conflictingReview={conflictingReview} setNote={editNote} watched={selectedIssuer !== null && watchedCiks.has(selectedIssuer.cik.value)} onWatchlist={() => void toggleWatchlist()} onReview={(nextStatus) => void saveReview(nextStatus)} onSelect={setSelectedId} busy={busy !== null} issuerNews={issuerNews} /></section><section className="sidebar-watchlist" aria-label="Personal watchlist">
         <div className="watchbar-copy"><span className="section-label">Personal watchlist</span><strong>{snapshot.watchlist.length === 0 ? "No issuers on your list" : `${snapshot.watchlist.length} issuer${snapshot.watchlist.length === 1 ? "" : "s"} on your list`}</strong><span>Search by company or ticker; the SEC identity is resolved and stored automatically.</span></div>
         <WatchlistEntries entries={snapshot.watchlist} busy={busy !== null} onRemove={(issuer) => void removeIssuer(issuer)} />
         <div className="coverage-readout" aria-live="polite"><span className="section-label">Public-company universe · separate from your personal list</span><strong>{snapshot.publicIssuerCoverage === null ? "Awaiting live SEC issuer directory" : `${snapshot.publicIssuerCoverage.eligibleIssuers.toLocaleString()} SEC-listed issuers · ${snapshot.publicIssuerCoverage.activeCoverageIssuers.toLocaleString()} in the rolling scan`}</strong><span>{snapshot.publicIssuerCoverage === null ? "The official SEC exchange directory powers broad company search and a separate, rotating filing scan. Your personal watchlist stays curated." : `${snapshot.publicIssuerCoverage.issuersScanned} checked this pass · next position ${snapshot.publicIssuerCoverage.activeCoverageIssuers === 0 ? "—" : (snapshot.publicIssuerCoverage.offsetAfter % snapshot.publicIssuerCoverage.activeCoverageIssuers + 1).toLocaleString()} of ${snapshot.publicIssuerCoverage.activeCoverageIssuers.toLocaleString()} · ${snapshot.publicIssuerCoverage.recentFilingsFound} recent filings found · ${snapshot.publicIssuerCoverage.recordsScreened} sent through TypeSafe AI · ${snapshot.publicIssuerCoverage.recordsPlaced} records placed · directory retrieved ${shortTime(snapshot.publicIssuerCoverage.retrievedAt)}. The scan is bounded and resumes at its stored cursor; it does not mean every issuer was checked in this pass.`}</span></div>
@@ -456,6 +529,7 @@ function WireCard({ event, selected, onSelect }: { event: Event; selected: boole
     <button className={`wire-tile ${selected ? "selected" : ""}`} onClick={onSelect} aria-pressed={selected}>
       <span className="tile-top"><i className={`tile-route ${route}`}>{route}</i><span className="tile-cat">{categoryLabel(event.screening.category)}</span><b className="tile-score">{event.screening.attentionScore}</b></span>
       <h4>{event.title}</h4>
+      <Sparkline event={event} />
       <span className="tile-meta"><b>{subjectCode(event.subject)}</b><span>{event.form}</span><time>{relativeTime(event.availableAt)}</time>{event.screening.level === "coarse" && <em>first pass</em>}</span>
     </button>
   );
@@ -466,7 +540,7 @@ function EmptyWire({ scope, hasOlder }: { scope: ScanSource; hasOlder: boolean }
   return <div className="empty-wire"><span className="empty-glyph">∅</span><strong>{hasOlder ? "No matching records on this page" : scope === "watchlist" ? "Your watchlist wire is empty" : "No live records placed"}</strong><p>{hasOlder ? "Load older records to continue searching this queue; matching counts apply to records loaded so far." : "Refresh requires the configured official source and TypeSafe AI credentials. The desk never fills this space with demo data."}</p></div>;
 }
 
-function DeskDetail({ event, snapshot, note, conflictingReview, setNote, watched, onWatchlist, onReview, onSelect, busy }: { event: Event | null; snapshot: AppSnapshot; note: string; conflictingReview: Event["review"] | null; setNote: (value: string) => void; watched: boolean; onWatchlist: () => void; onReview: (status: ReviewStatus) => void; onSelect: (id: string) => void; busy: boolean }): ReactElement {
+function DeskDetail({ event, snapshot, note, conflictingReview, setNote, watched, onWatchlist, onReview, onSelect, busy, issuerNews }: { event: Event | null; snapshot: AppSnapshot; note: string; conflictingReview: Event["review"] | null; setNote: (value: string) => void; watched: boolean; onWatchlist: () => void; onReview: (status: ReviewStatus) => void; onSelect: (id: string) => void; busy: boolean; issuerNews: { items: Array<{ title: string; url: string; publisher: string; publishedAt: string }>; note: string } | null }): ReactElement {
   if (event === null) return <div className="detail-empty"><span className="empty-glyph">↳</span><h2>Select a record</h2><p>Choose a record from the wire to inspect its source trail and leave a human review note.</p></div>;
   const related = snapshot.events.filter((candidate) => candidate.subject.kind === event.subject.kind && candidate.subject.name === event.subject.name && candidate.id !== event.id).slice(0, 3);
   const canWatch = event.subject.kind === "issuer";
@@ -480,7 +554,8 @@ function DeskDetail({ event, snapshot, note, conflictingReview, setNote, watched
   const clarityNote = event.screening.level === "coarse"
     ? "First pass — judged on filing metadata only. Open the source for the full document."
     : event.screening.evidenceComplete ? "" : "The captured document text was cut short; the full filing contains more.";
-  return <div className="desk-detail"><div className="detail-kicker"><span>{subjectCode(event.subject)}</span><span>{event.form}</span><span>{categoryLabel(event.screening.category)}</span>{canWatch && <button className={watched ? "watch-link active" : "watch-link"} onClick={onWatchlist}>{watched ? "on watchlist" : "track issuer"}</button>}</div><h2>{event.title}</h2><div className="detail-dates"><span><b>{event.kind === "news" ? "published" : "filed"}</b>{shortDate(event.publishedAt)} · {shortTime(event.availableAt)}</span></div>{event.marketContext && <p className="market-check"><b>Market check</b> shares {event.marketContext.changePercent > 0 ? "+" : ""}{event.marketContext.changePercent.toFixed(1)}% from the {shortDate(event.marketContext.baselineDate)} close to the {shortDate(event.marketContext.latestDate)} close · Yahoo Finance</p>}<div className="attention-strip"><div><span className="section-label">Attention score</span><strong>{event.screening.attentionScore}<small>/100</small></strong></div><p>{whySurfaced}</p><span className="lane-stamp">{laneLabel(event)}</span></div>{clarityNote && <p className="screening-limitations" aria-label="Screening limitations">{clarityNote}</p>}<section className="detail-block"><div className="block-heading"><h3>Why this surfaced</h3><span>{event.screening.modelConfidence}% confidence</span></div><div className="driver-grid"><Driver label="Materiality" value={event.screening.materiality} /><Driver label="Novelty" value={event.screening.novelty} /><Driver label="Market sensitivity" value={event.screening.marketSensitivity} /><Driver label="Thesis link" value={event.screening.thesisMatch} /></div></section><section className="detail-block source"><div className="block-heading"><h3>Primary source</h3></div><a className="source-link" href={event.source.url} target="_blank" rel="noreferrer"><span>{event.evidence[0].label}</span><b>Open source ↗</b></a></section>{related.length > 0 && <section className="detail-block related"><div className="block-heading"><h3>Same subject, nearby</h3><span>{related.length} records</span></div>{related.map((candidate) => <button key={candidate.id} onClick={() => onSelect(candidate.id)}><span>{candidate.title}</span><b>{candidate.screening.attentionScore}</b></button>)}</section>}<section className="review-block"><div className="block-heading"><h3>Human review</h3><span>{event.review.status}</span></div><textarea aria-label="Review note" value={note} onChange={(entry) => setNote(entry.target.value)} placeholder="What does this change in your research question?" />{conflictingReview !== null && <p className="review-conflict">Saved elsewhere ({conflictingReview.status}): {conflictingReview.note || "No note"}. Your draft remains above.</p>}<div className="review-actions"><button className="btn ghost" disabled={busy} onClick={() => onReview("snoozed")}>Snooze</button><button className="btn ghost" disabled={busy} onClick={() => onReview("dismissed")}>Dismiss</button><button className="btn" disabled={busy} onClick={() => onReview("reviewed")}>Save review</button></div></section></div>;
+  return <div className="desk-detail"><div className="detail-kicker"><span>{subjectCode(event.subject)}</span><span>{event.form}</span><span>{categoryLabel(event.screening.category)}</span>{canWatch && <button className={watched ? "watch-link active" : "watch-link"} onClick={onWatchlist}>{watched ? "on watchlist" : "track issuer"}</button>}</div><h2>{event.title}</h2><div className="detail-dates"><span><b>{event.kind === "news" ? "published" : "filed"}</b>{shortDate(event.publishedAt)} · {shortTime(event.availableAt)}</span></div>{event.marketContext && <div className="market-block"><FilingChart event={event} /><p className="market-check"><b>Market check</b> shares {event.marketContext.changePercent > 0 ? "+" : ""}{event.marketContext.changePercent.toFixed(1)}% since the filing-week close · Yahoo Finance</p></div>}<div className="attention-strip"><div><span className="section-label">Attention score</span><strong>{event.screening.attentionScore}<small>/100</small></strong></div><p>{whySurfaced}</p><span className="lane-stamp">{laneLabel(event)}</span></div>{clarityNote && <p className="screening-limitations" aria-label="Screening limitations">{clarityNote}</p>}<section className="detail-block"><div className="block-heading"><h3>Why this surfaced</h3><span>{event.screening.modelConfidence}% confidence</span></div><div className="driver-grid"><Driver label="Materiality" value={event.screening.materiality} /><Driver label="Novelty" value={event.screening.novelty} /><Driver label="Market sensitivity" value={event.screening.marketSensitivity} /><Driver label="Thesis link" value={event.screening.thesisMatch} /></div></section><section className="detail-block source"><div className="block-heading"><h3>Primary source</h3></div><a className="source-link" href={event.source.url} target="_blank" rel="noreferrer"><span>{event.evidence[0].label}</span><b>Open source ↗</b></a></section>{related.length > 0 && <section className="detail-block related"><div className="block-heading"><h3>Same subject, nearby</h3><span>{related.length} records</span></div>{related.map((candidate) => <button key={candidate.id} onClick={() => onSelect(candidate.id)}><span>{candidate.title}</span><b>{candidate.screening.attentionScore}</b></button>)}</section>}{(issuerNews !== null && (issuerNews.items.length > 0 || issuerNews.note !== "")) && <section className="detail-block news-block"><div className="block-heading"><h3>In the news</h3><span>external links · not screened</span></div>{issuerNews.items.map((item) => <a key={item.url} className="news-item" href={item.url} target="_blank" rel="noreferrer"><span>{item.title}</span><em>{item.publisher}{item.publishedAt !== "" ? ` · ${relativeTime(item.publishedAt)}` : ""}</em></a>)}{issuerNews.items.length === 0 && <p className="news-empty">{issuerNews.note}</p>}</section>}
+      <section className="review-block"><div className="block-heading"><h3>Human review</h3><span>{event.review.status}</span></div><textarea aria-label="Review note" value={note} onChange={(entry) => setNote(entry.target.value)} placeholder="What does this change in your research question?" />{conflictingReview !== null && <p className="review-conflict">Saved elsewhere ({conflictingReview.status}): {conflictingReview.note || "No note"}. Your draft remains above.</p>}<div className="review-actions"><button className="btn ghost" disabled={busy} onClick={() => onReview("snoozed")}>Snooze</button><button className="btn ghost" disabled={busy} onClick={() => onReview("dismissed")}>Dismiss</button><button className="btn" disabled={busy} onClick={() => onReview("reviewed")}>Save review</button></div></section></div>;
 }
 
 function Driver({ label, value }: { label: string; value: number }): ReactElement {

@@ -15,15 +15,22 @@ import (
 // at or before the filing date to the latest available close. It carries its
 // own provenance (dates, source, observation time) and is omitted entirely
 // when the data cannot be sourced — the desk never estimates a missing price.
+type investorMarketPoint struct {
+	Date  string  `json:"d"`
+	Close float64 `json:"c"`
+}
+
 type investorMarketContext struct {
-	Ticker        string  `json:"ticker"`
-	BaselineDate  string  `json:"baseline_date"`
-	BaselineClose float64 `json:"baseline_close"`
-	LatestDate    string  `json:"latest_date"`
-	LatestClose   float64 `json:"latest_close"`
-	ChangePercent float64 `json:"change_percent"`
-	Source        string  `json:"source"`
-	ObservedAt    string  `json:"observed_at"`
+	Ticker        string                `json:"ticker"`
+	BaselineDate  string                `json:"baseline_date"`
+	BaselineClose float64               `json:"baseline_close"`
+	LatestDate    string                `json:"latest_date"`
+	LatestClose   float64               `json:"latest_close"`
+	ChangePercent float64               `json:"change_percent"`
+	Source        string                `json:"source"`
+	ObservedAt    string                `json:"observed_at"`
+	Series        []investorMarketPoint `json:"series,omitempty"`
+	FiledIndex    int                   `json:"filed_index"`
 }
 
 var (
@@ -128,6 +135,9 @@ func investorPriceContext(ticker string, filedAt time.Time, timeout time.Duratio
 		}
 		points = append(points, point{date: time.Unix(stamp, 0).UTC(), close: *closes[index]})
 	}
+	if len(points) < 2 {
+		return investorMarketContext{}, false
+	}
 	baselineIndex := -1
 	for index, candidate := range points {
 		if !candidate.date.After(filedAt) {
@@ -148,6 +158,13 @@ func investorPriceContext(ticker string, filedAt time.Time, timeout time.Duratio
 		return investorMarketContext{}, false
 	}
 	change := math.Round((latest.close/baseline.close-1)*1000) / 10
+	series := make([]investorMarketPoint, 0, len(points))
+	for _, point := range points {
+		series = append(series, investorMarketPoint{
+			Date:  point.date.Format("2006-01-02"),
+			Close: math.Round(point.close*100) / 100,
+		})
+	}
 	return investorMarketContext{
 		Ticker:        ticker,
 		BaselineDate:  baseline.date.Format("2006-01-02") + "T00:00:00.000Z",
@@ -157,6 +174,8 @@ func investorPriceContext(ticker string, filedAt time.Time, timeout time.Duratio
 		ChangePercent: change,
 		Source:        "yahoo_finance",
 		ObservedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Series:        series,
+		FiledIndex:    baselineIndex,
 	}, true
 }
 
