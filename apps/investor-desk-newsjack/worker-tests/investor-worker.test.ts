@@ -2,6 +2,11 @@ import { beforeAll, describe, expect, it, vi, afterEach } from "vitest";
 import { env } from "cloudflare:workers";
 import { applyD1Migrations } from "cloudflare:test";
 import { EventSchema, IssuerSchema, nowIso, type Event } from "../src/domain";
+
+// Submissions fixtures must stay inside the seven-day recency window as
+// calendar time passes; these derive from the current date.
+const windowDate = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+const windowStamp = (days: number, time: string) => windowDate(days).replaceAll("-", "") + time;
 import { ProviderFailure, type CaptureRecord, type WorkerEnv } from "../worker/types";
 import { createCloudflareWorkerEnv, type CloudflareBindings } from "../worker/cloudflare-storage";
 import { InvestorRepository, type SecFilingQueueInput } from "../worker/repository";
@@ -1235,7 +1240,7 @@ describe("private investor Worker", () => {
           accessionNumber: ["0000001234-26-000001"],
           primaryDocument: ["notice.htm"],
           primaryDocDescription: ["Current report"],
-          filingDate: ["2026-09-23"],
+          filingDate: [windowDate(1)],
           acceptanceDateTime: [nowIso()],
         } } }), { headers: { "content-type": "application/json" } });
       }
@@ -1317,7 +1322,7 @@ describe("private investor Worker", () => {
           accessionNumber: ["0000001234-26-000009"],
           primaryDocument: ["boundary.htm"],
           primaryDocDescription: ["Current report"],
-          filingDate: ["2026-09-23"],
+          filingDate: [windowDate(1)],
           acceptanceDateTime: [nowIso()],
         } } });
       }
@@ -1452,7 +1457,7 @@ describe("private investor Worker", () => {
         submissionCalls += 1;
         const recent = submissionCalls === 1 ? {
           form: ["8-K"], accessionNumber: ["0000001234-26-000008"], primaryDocument: ["durable.htm"],
-          primaryDocDescription: ["Current report"], filingDate: ["2026-09-23"], acceptanceDateTime: ["20260923160000"],
+          primaryDocDescription: ["Current report"], filingDate: [windowDate(1)], acceptanceDateTime: [windowStamp(1, "160000")],
         } : { form: [], accessionNumber: [], primaryDocument: [], primaryDocDescription: [], filingDate: [], acceptanceDateTime: [] };
         return new Response(JSON.stringify({ filings: { recent } }));
       }
@@ -1705,7 +1710,7 @@ describe("private investor Worker", () => {
       if (url.href === "https://data.sec.gov/submissions/CIK0000001234.json") {
         return new Response(JSON.stringify({ filings: { recent: {
           form: ["8-K"], accessionNumber: ["0000001234-26-000009"], primaryDocument: ["stable.htm"],
-          primaryDocDescription: ["Current report"], filingDate: ["2026-09-23"], acceptanceDateTime: ["20260923090000"],
+          primaryDocDescription: ["Current report"], filingDate: [windowDate(1)], acceptanceDateTime: [windowStamp(1, "090000")],
         } } }));
       }
       if (url.hostname === "www.sec.gov" && url.pathname.endsWith("stable.htm")) {
